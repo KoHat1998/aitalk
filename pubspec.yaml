@@ -1,0 +1,60 @@
+name: sabai
+description: "A new Flutter project."
+publish_to: 'none'
+
+version: 1.0.0+1
+
+environment:
+  sdk: ^3.9.2
+
+dependencies:
+  flutter:
+    sdk: flutter
+  cupertino_icons: ^1.0.8
+  supabase_flutter: ^2.10.0
+  livekit_client: 2.5.0+hotfix.3
+  permission_handler: ^12.0.1
+  device_info_plus: ^11.5.0
+  logger: ^2.6.1
+  flutter_dotenv: ^5.1.0
+  qr_flutter: ^4.1.0
+  mobile_scanner: ^3.5.7
+  share_plus: ^11.1.0
+  audioplayers: ^6.0.0     # ← for ringtone
+
+dev_dependencies:
+  flutter_test:
+    sdk: flutter
+  flutter_lints: ^5.0.0
+  flutter_native_splash: ^2.4.2
+  flutter_launcher_icons: ^0.13.1
+
+flutter:
+  uses-material-design: true
+  assets:
+    - .env
+    # Branding & splash
+    - assets/aitalk_logo.png
+    - assets/aitalk_applogo.png
+    # Ringtone
+    - assets/ringtone.mp3
+
+# --- Splash screen configuration ---
+flutter_native_splash:
+  android: true
+  ios: false
+  # Pre-Android 12: full-screen background image
+  background_image: assets/aitalk_logo.png
+
+  # Android 12+: solid bg + centered logo
+  android_12:
+    color: "#0B0F14"
+    image: assets/aitalk_logo.png
+
+# --- App icon configuration ---
+flutter_launcher_icons:
+  android: true
+  ios: false
+  min_sdk_android: 24
+  image_path: assets/aitalk_applogo.png
+
