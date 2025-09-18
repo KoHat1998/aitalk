@@ -21,6 +21,7 @@ dependencies:
   mobile_scanner: ^3.5.7
   share_plus: ^11.1.0
   audioplayers: ^6.0.0     # ← for ringtone
+  google_mobile_ads: ^6.0.0
 
 dev_dependencies:
   flutter_test:

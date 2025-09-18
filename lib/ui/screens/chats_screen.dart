@@ -1,5 +1,6 @@
 import 'package:flutter/material.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
+import 'package:google_mobile_ads/google_mobile_ads.dart';
 
 import '../../core/app_routes.dart';
 import '../widgets/empty_state.dart';
@@ -22,10 +23,44 @@ class _ChatsScreenState extends State<ChatsScreen> {
   // Computed, per-thread preview (respects hides & soft-delete)
   final Map<String, String> _previews = {};
 
+  //AD banner
+  BannerAd? _bannerAd;
+  bool _isBannerAdLoaded = false;
+
+  final String _bannerAdUnitId = 'ca-app-pub-3940256099942544/6300978111';
+
   @override
   void initState() {
     super.initState();
     _load();
+    _loadBannerAd();
+  }
+
+  @override
+  void dispose() {
+    _bannerAd?.dispose();
+    super.dispose();
+  }
+
+  void _loadBannerAd() {
+    _bannerAd = BannerAd(
+      adUnitId: _bannerAdUnitId,
+      request: const AdRequest(),
+      size: AdSize.largeBanner, // Or AdSize.largeBanner, AdSize.fullBanner, etc.
+      listener: BannerAdListener(
+        onAdLoaded: (Ad ad) {
+          debugPrint('$BannerAd loaded.');
+          setState(() {
+            _isBannerAdLoaded = true;
+          });
+        },
+        onAdFailedToLoad: (Ad ad, LoadAdError error) {
+          debugPrint('$BannerAd failedToLoad: $error');
+          ad.dispose();
+        },
+        // Other listener events can be handled here (onAdOpened, onAdClosed, etc.)
+      ),
+    )..load();
   }
 
   Future<void> _load() async {
@@ -200,18 +235,18 @@ class _ChatsScreenState extends State<ChatsScreen> {
 
   @override
   Widget build(BuildContext context) {
-    Widget body;
+    Widget chatBody;
 
     if (_loading) {
-      body = const Center(child: CircularProgressIndicator());
+      chatBody = const Center(child: CircularProgressIndicator());
     } else if (_items.isEmpty) {
-      body = const EmptyState(
+      chatBody = const EmptyState(
         icon: Icons.chat_bubble_outline,
         title: 'No chats yet',
         subtitle: 'Your recent conversations will appear here.',
       );
     } else {
-      body = RefreshIndicator(
+      chatBody = RefreshIndicator(
         onRefresh: _load,
         child: ListView.separated(
           padding: const EdgeInsets.all(16),
@@ -266,7 +301,20 @@ class _ChatsScreenState extends State<ChatsScreen> {
 
     return Scaffold(
       appBar: AppBar(title: const Text('Chats')),
-      body: body,
+      body: Column(
+        children: [
+          if (_isBannerAdLoaded && _bannerAd != null)
+            Container(
+              alignment: Alignment.center,
+              width: _bannerAd!.size.width.toDouble(),
+              height: _bannerAd!.size.height.toDouble(),
+              child: AdWidget(ad: _bannerAd!),
+            ),
+          Expanded(
+              child: chatBody,
+            ),
+        ],
+      )
     );
   }
 }
