@@ -46,7 +46,7 @@ class _ChatsScreenState extends State<ChatsScreen> {
     _bannerAd = BannerAd(
       adUnitId: _bannerAdUnitId,
       request: const AdRequest(),
-      size: AdSize.largeBanner, // Or AdSize.largeBanner, AdSize.fullBanner, etc.
+      size: AdSize.fullBanner, // Or AdSize.largeBanner, AdSize.fullBanner, etc.
       listener: BannerAdListener(
         onAdLoaded: (Ad ad) {
           debugPrint('$BannerAd loaded.');

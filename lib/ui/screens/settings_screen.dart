@@ -3,6 +3,9 @@ import 'package:flutter/services.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
 import '../../core/app_routes.dart';
 import '../widgets/avatar.dart';
+// Use your package name from pubspec.yaml (you have "sabai")
+import 'package:sabai/features/support/help_support_screen.dart';
+
 
 class SettingsScreen extends StatefulWidget {
   const SettingsScreen({super.key});
@@ -127,7 +130,28 @@ class _SettingsScreenState extends State<SettingsScreen> {
               const SizedBox(height: 16),
               const Text('App Settings', style: TextStyle(fontWeight: FontWeight.w600)),
               Card(child: ListTile(leading: const Icon(Icons.privacy_tip_outlined), title: const Text('Privacy Policy'), trailing: const Icon(Icons.chevron_right), onTap: () {})),
-              Card(child: ListTile(leading: const Icon(Icons.help_outline), title: const Text('Help & Support'), trailing: const Icon(Icons.chevron_right), onTap: () {})),
+              Card(
+                child: ListTile(
+                  leading: const Icon(Icons.help_outline),
+                  title: const Text('Help & Support'),
+                  trailing: const Icon(Icons.chevron_right),
+                  onTap: () {
+                    final authEmail = Supabase.instance.client.auth.currentUser?.email ?? '';
+                    if (authEmail.isEmpty) {
+                      ScaffoldMessenger.of(context).showSnackBar(
+                        const SnackBar(content: Text('Please sign in to contact support.')),
+                      );
+                      return;
+                    }
+                    Navigator.push(
+                      context,
+                      MaterialPageRoute(
+                        builder: (_) => HelpSupportScreen(userEmail: authEmail),
+                      ),
+                    );
+                  },
+                ),
+              ),
               Card(child: ListTile(leading: const Icon(Icons.info_outline), title: const Text('AI TALK'), trailing: const Icon(Icons.chevron_right), onTap: () {})),
 
               const SizedBox(height: 16),
