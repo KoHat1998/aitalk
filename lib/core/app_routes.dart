@@ -29,6 +29,7 @@ class AppRoutes {
 
   static const contacts = '/contacts';
   static const chats = '/chats';
+  static const news = "/post";
   static const settings = '/settings';
   static const newGroup = '/new-group';
 

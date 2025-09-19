@@ -1,4 +1,5 @@
 import 'package:flutter/material.dart';
+import 'package:sabai/ui/screens/news_screen.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
 
 import '../../core/app_routes.dart';
@@ -15,7 +16,7 @@ class Shell extends StatefulWidget {
 
 class _ShellState extends State<Shell> {
   int idx = 0;
-  final pages = const [ContactsScreen(), ChatsScreen(), SettingsScreen()];
+  final pages = const [ContactsScreen(), ChatsScreen(), NewsScreen(), SettingsScreen()];
 
   final _sb = Supabase.instance.client;
   RealtimeChannel? _incomingChan;
@@ -98,6 +99,7 @@ class _ShellState extends State<Shell> {
         destinations: const [
           NavigationDestination(icon: Icon(Icons.people_outline), selectedIcon: Icon(Icons.people), label: 'Contacts'),
           NavigationDestination(icon: Icon(Icons.chat_bubble_outline), selectedIcon: Icon(Icons.chat_bubble), label: 'Chats'),
+          NavigationDestination(icon: Icon(Icons.newspaper_outlined), selectedIcon: Icon(Icons.newspaper), label: 'NewsFeed'),
           NavigationDestination(icon: Icon(Icons.settings_outlined), selectedIcon: Icon(Icons.settings), label: 'Settings'),
         ],
       ),
