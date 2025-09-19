@@ -59,6 +59,7 @@ class _NewsScreenState extends State<NewsScreen> {
               id,
               user_id,
               content,
+              image_url,
               created_at,
               author:users ( 
                 display_name,
