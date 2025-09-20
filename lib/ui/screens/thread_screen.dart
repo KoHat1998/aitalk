@@ -34,14 +34,17 @@ class _ThreadScreenState extends State<ThreadScreen> {
   final _composer = TextEditingController();
   final _scroll = ScrollController();
 
-  RealtimeChannel? _chan;           // messages realtime
-  RealtimeChannel? _hidesChan;      // per-user hides realtime
+  RealtimeChannel? _chan;      // messages realtime
+  RealtimeChannel? _hidesChan; // per-user hides realtime
   bool _loading = true;
 
   // All messages (ordered asc)
   final List<Map<String, dynamic>> _messages = [];
   // Per-user hidden message IDs (Delete for me)
   final Set<String> _hidden = {};
+
+  // Per-user cutoff: messages at/older than this are ignored for this user
+  DateTime? _cutoff;
 
   String? get _myId => _sb.auth.currentUser?.id;
 
@@ -69,12 +72,22 @@ class _ThreadScreenState extends State<ThreadScreen> {
   Future<void> _load() async {
     setState(() => _loading = true);
     try {
-      // 1) Load messages (include deleted fields)
-      final rows = await _sb
+      // 0) Fetch/reset cutoff for this user+thread
+      await _loadCutoff();
+
+      // 1) Load messages (include deleted fields), filtered by cutoff
+      var q = _sb
           .from('messages')
-          .select('id, sender_id, kind, body, created_at, deleted_at, deleted_by')
-          .eq('thread_id', _tid)
-          .order('created_at', ascending: true);
+          .select(
+          'id, sender_id, kind, body, created_at, deleted_at, deleted_by')
+          .eq('thread_id', _tid);
+
+      if (_cutoff != null) {
+        q = q.gte('created_at', _cutoff!.toUtc().toIso8601String());
+      }
+
+      final rows =
+      await q.order('created_at', ascending: true); // order last
 
       _messages
         ..clear()
@@ -89,6 +102,28 @@ class _ThreadScreenState extends State<ThreadScreen> {
       if (!mounted) return;
       setState(() => _loading = false);
       _snack('Failed to load messages: $e');
+    }
+  }
+
+  Future<void> _loadCutoff() async {
+    try {
+      final me = _myId;
+      if (me == null) return;
+
+      final row = await _sb
+          .from('thread_resets')
+          .select('cutoff_at')
+          .eq('thread_id', _tid)
+          .eq('user_id', me)
+          .maybeSingle();
+
+      if (row != null && row['cutoff_at'] != null) {
+        _cutoff = DateTime.tryParse(row['cutoff_at'] as String)?.toUtc();
+      } else {
+        _cutoff = null;
+      }
+    } catch (_) {
+      _cutoff = null; // fail-open
     }
   }
 
@@ -129,6 +164,16 @@ class _ThreadScreenState extends State<ThreadScreen> {
       callback: (payload) {
         final rec = payload.newRecord;
         if (rec == null) return;
+
+        // Respect cutoff: ignore historical inserts (e.g., backfills)
+        final createdAtStr = rec['created_at'] as String?;
+        if (_cutoff != null &&
+            createdAtStr != null &&
+            (DateTime.tryParse(createdAtStr)?.toUtc() ?? DateTime.now().toUtc())
+                .isBefore(_cutoff!)) {
+          return;
+        }
+
         final m = Map<String, dynamic>.from(rec);
         _messages.add(m);
         if (mounted) setState(() {});
@@ -148,6 +193,16 @@ class _ThreadScreenState extends State<ThreadScreen> {
       callback: (payload) {
         final rec = payload.newRecord;
         if (rec == null) return;
+
+        // Respect cutoff for updates too
+        final createdAtStr = rec['created_at'] as String?;
+        if (_cutoff != null &&
+            createdAtStr != null &&
+            (DateTime.tryParse(createdAtStr)?.toUtc() ?? DateTime.now().toUtc())
+                .isBefore(_cutoff!)) {
+          return;
+        }
+
         final id = rec['id'];
         final idx = _messages.indexWhere((m) => m['id'] == id);
         if (idx != -1) {
@@ -182,8 +237,9 @@ class _ThreadScreenState extends State<ThreadScreen> {
         final mid = rec['message_id'] as String?;
         if (mid == null) return;
 
-        // Only hide if that message belongs to this thread
-        if (_messages.any((m) => m['id'] == mid)) {
+        // Only hide if that message belongs to this thread AND is after cutoff
+        final idx = _messages.indexWhere((m) => m['id'] == mid);
+        if (idx != -1) {
           _hidden.add(mid);
           if (mounted) setState(() {});
         }
@@ -305,6 +361,40 @@ class _ThreadScreenState extends State<ThreadScreen> {
     );
   }
 
+  // Clear entire chat for me (sets/reset cutoff and removes older local msgs)
+  Future<void> _clearChatForMe() async {
+    final ok = await showDialog<bool>(
+      context: context,
+      builder: (_) => AlertDialog(
+        title: const Text('Clear chat?'),
+        content: const Text(
+            'This removes the conversation history for you. Others keep their messages.'),
+        actions: [
+          TextButton(onPressed: () => Navigator.pop(context, false), child: const Text('Cancel')),
+          FilledButton(onPressed: () => Navigator.pop(context, true), child: const Text('Clear')),
+        ],
+      ),
+    );
+    if (ok != true) return;
+
+    try {
+      await _sb.rpc('hide_thread', params: {'p_thread_id': _tid});
+      // Update local cutoff and drop older messages
+      _cutoff = DateTime.now().toUtc();
+      _messages.removeWhere((m) {
+        final ts = DateTime.tryParse(m['created_at'] ?? '')?.toUtc();
+        return ts == null || !ts.isAfter(_cutoff!);
+      });
+      _hidden.clear(); // old hides no longer relevant
+      if (mounted) setState(() {});
+      _snack('Chat cleared');
+    } on PostgrestException catch (e) {
+      _snack(e.message);
+    } catch (e) {
+      _snack('Clear failed: $e');
+    }
+  }
+
   // ---------- Calling (ringing) from a 1v1 thread ----------
 
   Future<void> _startCall({required bool video}) async {
@@ -321,8 +411,10 @@ class _ThreadScreenState extends State<ThreadScreen> {
 
     try {
       // find the other participant in this 1v1
-      final memRows =
-      await _sb.from('thread_members').select('user_id').eq('thread_id', _tid);
+      final memRows = await _sb
+          .from('thread_members')
+          .select('user_id')
+          .eq('thread_id', _tid);
 
       final others = (memRows as List)
           .map((m) => (m as Map)['user_id'] as String)
@@ -400,12 +492,14 @@ class _ThreadScreenState extends State<ThreadScreen> {
   // ---------- UI ----------
 
   void _snack(String m) =>
-      ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(m)));
+      ScaffoldMessenger.of(context)
+          .showSnackBar(SnackBar(content: Text(m)));
 
   @override
   Widget build(BuildContext context) {
-    // Filter with per-user hides
-    final visible = _messages.where((m) => !_hidden.contains(m['id'])).toList();
+    // Filter with per-user hides (cutoff already applied at load time)
+    final visible =
+    _messages.where((m) => !_hidden.contains(m['id'])).toList();
 
     return Scaffold(
       appBar: AppBar(
@@ -415,6 +509,17 @@ class _ThreadScreenState extends State<ThreadScreen> {
             tooltip: 'Call',
             icon: const Icon(Icons.call_outlined), // audio-first affordance
             onPressed: _openCallSheet,             // choose Audio/Video
+          ),
+          PopupMenuButton<String>(
+            onSelected: (v) {
+              if (v == 'clear') _clearChatForMe();
+            },
+            itemBuilder: (_) => const [
+              PopupMenuItem(
+                value: 'clear',
+                child: Text('Clear chat for me'),
+              ),
+            ],
           ),
         ],
       ),
@@ -432,16 +537,16 @@ class _ThreadScreenState extends State<ThreadScreen> {
                 final isMe = m['sender_id'] == _myId;
                 final deleted =
                     m['deleted_at'] != null || (m['kind'] == 'deleted');
-                final body = deleted
-                    ? 'Message deleted'
-                    : (m['body'] as String?) ?? '';
+                final body =
+                deleted ? 'Message deleted' : (m['body'] as String?) ?? '';
 
                 final ts = DateTime.tryParse(m['created_at'] ?? '') ??
                     DateTime.now();
 
                 return Align(
-                  alignment:
-                  isMe ? Alignment.centerRight : Alignment.centerLeft,
+                  alignment: isMe
+                      ? Alignment.centerRight
+                      : Alignment.centerLeft,
                   child: ConstrainedBox(
                     constraints: const BoxConstraints(maxWidth: 320),
                     child: Card(
@@ -467,8 +572,9 @@ class _ThreadScreenState extends State<ThreadScreen> {
                                   fontStyle: deleted
                                       ? FontStyle.italic
                                       : FontStyle.normal,
-                                  color:
-                                  deleted ? Colors.grey.shade600 : null,
+                                  color: deleted
+                                      ? Colors.grey.shade600
+                                      : null,
                                 ),
                               ),
                               const SizedBox(height: 6),

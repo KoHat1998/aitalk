@@ -20,13 +20,15 @@ class _ChatsScreenState extends State<ChatsScreen> {
   bool _loading = true;
   List<Map<String, dynamic>> _items = [];
 
-  // Computed, per-thread preview (respects hides & soft-delete)
+  /// Per-thread preview text (already filtered by cutoff & hides)
   final Map<String, String> _previews = {};
 
-  //AD banner
+  /// Per-thread cutoff loaded from `thread_resets` for the signed-in user
+  final Map<String, DateTime> _cutoffs = {};
+
+  // ---- Ad banner ----
   BannerAd? _bannerAd;
   bool _isBannerAdLoaded = false;
-
   final String _bannerAdUnitId = 'ca-app-pub-3940256099942544/6300978111';
 
   @override
@@ -46,19 +48,14 @@ class _ChatsScreenState extends State<ChatsScreen> {
     _bannerAd = BannerAd(
       adUnitId: _bannerAdUnitId,
       request: const AdRequest(),
-      size: AdSize.fullBanner, // Or AdSize.largeBanner, AdSize.fullBanner, etc.
+      size: AdSize.fullBanner,
       listener: BannerAdListener(
         onAdLoaded: (Ad ad) {
-          debugPrint('$BannerAd loaded.');
-          setState(() {
-            _isBannerAdLoaded = true;
-          });
+          setState(() => _isBannerAdLoaded = true);
         },
         onAdFailedToLoad: (Ad ad, LoadAdError error) {
-          debugPrint('$BannerAd failedToLoad: $error');
           ad.dispose();
         },
-        // Other listener events can be handled here (onAdOpened, onAdClosed, etc.)
       ),
     )..load();
   }
@@ -66,12 +63,17 @@ class _ChatsScreenState extends State<ChatsScreen> {
   Future<void> _load() async {
     setState(() => _loading = true);
     try {
+      // 1) server-side list
       final res = await _sb.rpc('list_threads');
       final rows = (res as List?) ?? const [];
       _items = rows.cast<Map>().map((e) => Map<String, dynamic>.from(e)).toList();
 
-      // Compute previews that honor "delete for me" and "delete for everyone"
+      // 2) load all user cutoffs once
+      await _loadCutoffs();
+
+      // 3) compute previews honoring cutoff + hides + soft-deletes
       await _refreshPreviews();
+
       if (mounted) setState(() {});
     } on PostgrestException catch (e) {
       if (!mounted) return;
@@ -84,7 +86,24 @@ class _ChatsScreenState extends State<ChatsScreen> {
     }
   }
 
-  // Build a title for a thread row (1v1 or group)
+  Future<void> _loadCutoffs() async {
+    _cutoffs.clear();
+    try {
+      final rows = await _sb.from('thread_resets').select('thread_id, cutoff_at');
+      for (final r in (rows as List)) {
+        final tid = r['thread_id'] as String?;
+        final iso = r['cutoff_at'] as String?;
+        if (tid != null && iso != null) {
+          final dt = DateTime.tryParse(iso);
+          if (dt != null) _cutoffs[tid] = dt.toUtc();
+        }
+      }
+    } catch (_) {
+      // No cutoffs yet or table missing -> fine
+    }
+  }
+
+  // Title for a row (1v1 or group)
   String _titleFor(Map<String, dynamic> row) {
     final type = (row['type'] as String?) ?? '1v1';
     if (type == '1v1') {
@@ -98,46 +117,52 @@ class _ChatsScreenState extends State<ChatsScreen> {
         : 'Group';
   }
 
-  // Compute last visible message per thread, respecting:
-  // - soft delete: deleted_at != null OR kind == 'deleted' -> "Message deleted"
-  // - delete-for-me: exclude messages present in message_hides for current user
-  // We fetch only a small tail (e.g. 20) to find the first visible preview.
+  /// Compute last visible message per thread, respecting:
+  /// - cutoff: ignore messages created_at <= cutoff_at
+  /// - soft delete: deleted_at != null OR kind == 'deleted' -> "Message deleted"
+  /// - delete-for-me: exclude messages present in message_hides for current user
   Future<void> _refreshPreviews() async {
     _previews.clear();
+
     for (final row in _items) {
       final tid = (row['thread_id'] as String?) ?? row['thread_id'].toString();
       String preview = 'Say hi 👋';
 
       try {
-        // Pull a small tail of recent messages
-        final msgs = await _sb
+        final cutoff = _cutoffs[tid];
+
+// Build the query with filters first, then order/limit
+        var q = _sb
             .from('messages')
             .select('id, body, kind, deleted_at, created_at')
-            .eq('thread_id', tid)
+            .eq('thread_id', tid);
+
+        if (cutoff != null) {
+          // use gt or gte as you prefer
+          q = q.gte('created_at', cutoff.toIso8601String());
+        }
+
+        final msgs = await q
             .order('created_at', ascending: false)
             .limit(20);
 
         final list = (msgs as List).cast<Map>();
 
         if (list.isEmpty) {
-          // fall back to server-provided summary or friendly prompt
-          preview = (row['last_message'] as String?) ?? preview;
-          _previews[tid] = preview;
+          _previews[tid] = (row['last_message'] as String?) ?? preview;
           continue;
         }
 
-        // Load hides for those messages for the current user
+        // Load "delete for me" hides for those messages
         final ids = list.map((m) => m['id'] as String).toList();
         final hides = await _sb
             .from('message_hides')
             .select('message_id')
             .or(ids.map((id) => 'message_id.eq.$id').join(','));
-
         final hiddenSet = {
           ...(hides as List).map((h) => h['message_id'] as String),
         };
 
-        // Pick the first non-hidden message; if soft-deleted, show placeholder
         String? chosen;
         for (final m in list) {
           final mid = m['id'] as String;
@@ -157,15 +182,11 @@ class _ChatsScreenState extends State<ChatsScreen> {
           }
         }
 
-        preview = chosen ??
-            (row['last_message'] as String?) ??
-            preview;
+        _previews[tid] =
+            chosen ?? (row['last_message'] as String?) ?? preview;
       } catch (_) {
-        // On any error, fall back to server’s last_message (if provided)
-        preview = (row['last_message'] as String?) ?? preview;
+        _previews[tid] = (row['last_message'] as String?) ?? 'Say hi 👋';
       }
-
-      _previews[tid] = preview;
     }
   }
 
@@ -181,30 +202,24 @@ class _ChatsScreenState extends State<ChatsScreen> {
         isGroup: (row['type'] == 'group'),
       ),
     );
-    if (mounted) _load(); // refresh previews after returning
+    if (mounted) _load(); // refresh after returning
   }
 
-  // ===== Delete chat (hide thread for current user only) =====
+  // ===== Clear chat history for me (sets cutoff and hides from list now) =====
   Future<void> _deleteChatForMe(Map<String, dynamic> row) async {
     final threadId = (row['thread_id'] as String?) ?? row['thread_id'].toString();
 
     final ok = await showDialog<bool>(
       context: context,
       builder: (_) => AlertDialog(
-        title: const Text('Delete chat?'),
+        title: const Text('Clear chat history?'),
         content: const Text(
-          'This removes the conversation from your Chats list. '
-              'Other participants will keep their history.',
+          'This clears your copy of the conversation and removes it from the list. '
+              'New messages will show up as a fresh chat; old messages will not reappear.',
         ),
         actions: [
-          TextButton(
-            onPressed: () => Navigator.pop(context, false),
-            child: const Text('Cancel'),
-          ),
-          FilledButton(
-            onPressed: () => Navigator.pop(context, true),
-            child: const Text('Delete'),
-          ),
+          TextButton(onPressed: () => Navigator.pop(context, false), child: const Text('Cancel')),
+          FilledButton(onPressed: () => Navigator.pop(context, true), child: const Text('Clear')),
         ],
       ),
     );
@@ -212,21 +227,22 @@ class _ChatsScreenState extends State<ChatsScreen> {
     if (ok != true) return;
 
     try {
-      // Server-side: mark this thread hidden for current user
-      await _sb.rpc('hide_thread', params: {'p_thread_id': threadId});
+      // Server: set/reset cutoff and (optionally) hide the thread now
+      await _sb.rpc('reset_thread', params: {'p_thread_id': threadId});
 
       // Local: remove from list & previews
       _items.removeWhere(
             (it) => ((it['thread_id'] as String?) ?? it['thread_id'].toString()) == threadId,
       );
       _previews.remove(threadId);
+      _cutoffs.remove(threadId);
 
       if (mounted) setState(() {});
-      _snack('Chat deleted');
+      _snack('Chat cleared');
     } on PostgrestException catch (e) {
       _snack(e.message);
     } catch (e) {
-      _snack('Delete failed: $e');
+      _snack('Action failed: $e');
     }
   }
 
@@ -262,18 +278,14 @@ class _ChatsScreenState extends State<ChatsScreen> {
               child: ListTile(
                 leading: Avatar(name: title),
                 title: Text(title, maxLines: 1, overflow: TextOverflow.ellipsis),
-                subtitle: Text(
-                  subtitle,
-                  maxLines: 1,
-                  overflow: TextOverflow.ellipsis,
-                ),
+                subtitle: Text(subtitle, maxLines: 1, overflow: TextOverflow.ellipsis),
                 onTap: () => _openThread(row),
                 trailing: PopupMenuButton<String>(
                   onSelected: (v) {
                     if (v == 'delete') _deleteChatForMe(row);
                   },
                   itemBuilder: (_) => const [
-                    PopupMenuItem(value: 'delete', child: Text('Delete chat')),
+                    PopupMenuItem(value: 'delete', child: Text('Clear chat')),
                   ],
                 ),
               ),
@@ -290,7 +302,7 @@ class _ChatsScreenState extends State<ChatsScreen> {
               ),
               confirmDismiss: (_) async {
                 await _deleteChatForMe(row);
-                return false; // we already removed locally if successful
+                return false; // already updated locally if successful
               },
               child: tile,
             );
@@ -310,11 +322,9 @@ class _ChatsScreenState extends State<ChatsScreen> {
               height: _bannerAd!.size.height.toDouble(),
               child: AdWidget(ad: _bannerAd!),
             ),
-          Expanded(
-              child: chatBody,
-            ),
+          Expanded(child: chatBody),
         ],
-      )
+      ),
     );
   }
 }
