@@ -1,8 +1,9 @@
-// lib/ui/screens/create_post_screen.dart
-import 'dart:io'; // Import for File
+
+import 'dart:io';
 import 'package:flutter/material.dart';
-import 'package:image_picker/image_picker.dart'; // Import image_picker
+import 'package:image_picker/image_picker.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
+import '../../utils/storage_utils.dart';
 
 class CreatePostScreen extends StatefulWidget {
   const CreatePostScreen({super.key});
@@ -16,8 +17,6 @@ class _CreatePostScreenState extends State<CreatePostScreen> {
   final _formKey = GlobalKey<FormState>();
   final _contentController = TextEditingController();
   bool _isLoading = false;
-
-  // State variable to hold the selected image file
   XFile? _selectedImageFile;
   final ImagePicker _picker = ImagePicker();
 
@@ -77,89 +76,45 @@ class _CreatePostScreenState extends State<CreatePostScreen> {
   }
 
 
-  Future<String?> _uploadImage(XFile imageFile) async {
-    final String? userId = currentLoggedInUserId;
-    if (userId == null) {
-      if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(content: Text('Error: You must be logged in to upload images.')),
-        );
-      }
-      return null;
-    }
-    try {
-      final String fileName = '${DateTime.now().millisecondsSinceEpoch}_${imageFile.name}';
-      const String bucketName = 'post_images';
-
-      final String storagePath = 'public/$userId/$fileName';
-
-
-      await _supabase.storage
-          .from(bucketName) // Use your bucket name
-          .upload(
-        storagePath, // Path within the bucket
-        File(imageFile.path),
-        fileOptions: const FileOptions(cacheControl: '3600', upsert: false),
-      );
-
-      // Get the public URL
-      final String publicUrl = _supabase.storage
-          .from(bucketName)
-          .getPublicUrl(storagePath);
-
-      return publicUrl;
-
-    } catch (e) {
-      if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(content: Text('Error uploading image: $e')),
-        );
-      }
-      print('Image Upload Error: $e');
-      return null;
-    }
-  }
-
-
   Future<void> _submitPost() async {
-    final String? userId = currentLoggedInUserId; // Get it here
     if (!_formKey.currentState!.validate()) {
       return;
     }
 
-    if (userId == null) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(
-          content: Text('Error: You must logged in to create a post'),
-          backgroundColor: Colors.red,
-        ),
-      );
+    // Check for authenticated user (important before calling utility function if it doesn't do its own check)
+    // The utility function `uploadImageToSupabase` already checks for an authenticated user.
+    // However, for the database insert of the post itself, we still need the user ID.
+    final String? currentAuthUserId = _supabase.auth.currentUser?.id;
+    if (currentAuthUserId == null) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('You must be logged in to create a post.'), backgroundColor: Colors.red),
+        );
+      }
       return;
     }
 
-    setState(() {
-      _isLoading = true;
-    });
+    setState(() { _isLoading = true; });
 
     String? uploadedImageUrl;
 
     // 1. Upload image if selected
     if (_selectedImageFile != null) {
-      uploadedImageUrl = await _uploadImage(_selectedImageFile!);
-      if (uploadedImageUrl == null && mounted) { // Check if upload failed
-        ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(content: Text('Image upload failed. Post not created.'), backgroundColor: Colors.red),
-        );
+      //                                 Pass context VVVVVVV
+      uploadedImageUrl = await uploadImageToSupabase(context, _selectedImageFile!, 'post_images');
+      if (uploadedImageUrl == null && mounted) {
+        // Error message is already shown by uploadImageToSupabase if context was mounted
+        // You might just want to stop loading and return
         setState(() { _isLoading = false; });
         return;
       }
     }
 
-    // 2. Insert post data (including image URL if available)
+    // 2. Insert post data
     try {
       await _supabase.from('posts').insert({
-        'user_id': userId,
-        'content': _contentController.text.isEmpty && uploadedImageUrl != null ? null : _contentController.text, // Allow empty content if image exists
+        'user_id': currentAuthUserId, // Use the authenticated user's ID
+        'content': _contentController.text.isEmpty && uploadedImageUrl != null ? null : _contentController.text,
         'image_url': uploadedImageUrl,
       });
 
@@ -167,7 +122,7 @@ class _CreatePostScreenState extends State<CreatePostScreen> {
         ScaffoldMessenger.of(context).showSnackBar(
           const SnackBar(content: Text('Post created successfully!')),
         );
-        Navigator.pop(context, true);
+        Navigator.pop(context, true); // Signal success to refresh feed
       }
     } on PostgrestException catch (e) {
       if (mounted) {
@@ -175,19 +130,15 @@ class _CreatePostScreenState extends State<CreatePostScreen> {
           SnackBar(content: Text('Failed to create post: ${e.message}'), backgroundColor: Colors.red),
         );
       }
-      print('Supabase create post error: ${e.toString()}');
     } catch (e) {
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
           SnackBar(content: Text('An unexpected error occurred: $e'), backgroundColor: Colors.red),
         );
       }
-      print('Generic create post error: ${e.toString()}');
     } finally {
       if (mounted) {
-        setState(() {
-          _isLoading = false;
-        });
+        setState(() { _isLoading = false; });
       }
     }
   }
