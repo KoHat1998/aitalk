@@ -83,10 +83,6 @@ class _ThreadScreenState extends State<ThreadScreen> {
   Future<void> _load() async {
     setState(() => _loading = true);
     try {
-<<<<<<< HEAD
-      // 0) Fetch cutoff for this user+thread
-=======
->>>>>>> 8b10b024d6d4d8e891332982e8f970c4b26dd8d7
       await _loadCutoff();
 
       var q = _sb
@@ -102,10 +98,6 @@ class _ThreadScreenState extends State<ThreadScreen> {
       }
 
       final rows = await q.order('created_at', ascending: true);
-<<<<<<< HEAD
-
-=======
->>>>>>> 8b10b024d6d4d8e891332982e8f970c4b26dd8d7
       _messages
         ..clear()
         ..addAll((rows as List).cast<Map<String, dynamic>>());
@@ -151,79 +143,11 @@ class _ThreadScreenState extends State<ThreadScreen> {
         final mid = r['message_id'] as String?;
         if (mid != null) _hidden.add(mid);
       }
-<<<<<<< HEAD
-    } catch (_) {
-      // Non-fatal
-    }
-=======
     } catch (_) {/* ignore */}
->>>>>>> 8b10b024d6d4d8e891332982e8f970c4b26dd8d7
   }
 
   // ------------------ Realtime ------------------
   void _subscribeMessages() {
-<<<<<<< HEAD
-    _chan = _sb.channel('realtime:messages:$_tid');
-
-    // INSERTS (new messages)
-    _chan!
-        .onPostgresChanges(
-      event: PostgresChangeEvent.insert,
-      schema: 'public',
-      table: 'messages',
-      filter: PostgresChangeFilter(
-        type: PostgresChangeFilterType.eq,
-        column: 'thread_id',
-        value: _tid,
-      ),
-      callback: (payload) {
-        final rec = payload.newRecord;
-        if (rec == null) return;
-
-        // Respect cutoff: ignore anything created <= cutoff
-        final createdAtStr = rec['created_at'] as String?;
-        if (_cutoff != null &&
-            createdAtStr != null &&
-            (DateTime.tryParse(createdAtStr)?.toUtc() ??
-                DateTime.now().toUtc())
-                .isBefore(_cutoff!)) {
-          return;
-        }
-
-        _messages.add(Map<String, dynamic>.from(rec));
-        if (mounted) setState(() {});
-        _scrollToBottomSoon();
-      },
-    )
-    // UPDATES (soft delete / edits)
-        .onPostgresChanges(
-      event: PostgresChangeEvent.update,
-      schema: 'public',
-      table: 'messages',
-      filter: PostgresChangeFilter(
-        type: PostgresChangeFilterType.eq,
-        column: 'thread_id',
-        value: _tid,
-      ),
-      callback: (payload) {
-        final rec = payload.newRecord;
-        if (rec == null) return;
-
-        // Respect cutoff for updates too
-        final createdAtStr = rec['created_at'] as String?;
-        if (_cutoff != null &&
-            createdAtStr != null &&
-            (DateTime.tryParse(createdAtStr)?.toUtc() ??
-                DateTime.now().toUtc())
-                .isBefore(_cutoff!)) {
-          return;
-        }
-
-        final id = rec['id'];
-        final idx = _messages.indexWhere((m) => m['id'] == id);
-        if (idx != -1) {
-          _messages[idx] = Map<String, dynamic>.from(rec);
-=======
     _chan = _sb.channel('realtime:messages:$_tid')
       ..onPostgresChanges(
         event: PostgresChangeEvent.insert,
@@ -245,7 +169,6 @@ class _ThreadScreenState extends State<ThreadScreen> {
             return;
           }
           _messages.add(Map<String, dynamic>.from(rec));
->>>>>>> 8b10b024d6d4d8e891332982e8f970c4b26dd8d7
           if (mounted) setState(() {});
           _scrollToBottomSoon();
         },
@@ -279,38 +202,6 @@ class _ThreadScreenState extends State<ThreadScreen> {
       ).subscribe();
   }
 
-<<<<<<< HEAD
-  // Realtime for "delete for me" on another device of the same user
-  void _subscribeMyHides() {
-    final me = _myId;
-    if (me == null) return;
-
-    _hidesChan = _sb.channel('realtime:message_hides:$me');
-
-    _hidesChan!
-        .onPostgresChanges(
-      event: PostgresChangeEvent.insert,
-      schema: 'public',
-      table: 'message_hides',
-      filter: PostgresChangeFilter(
-        type: PostgresChangeFilterType.eq,
-        column: 'user_id',
-        value: me,
-      ),
-      callback: (payload) {
-        final rec = payload.newRecord;
-        if (rec == null) return;
-        final mid = rec['message_id'] as String?;
-        if (mid == null) return;
-
-        if (_messages.any((m) => m['id'] == mid)) {
-          _hidden.add(mid);
-          if (mounted) setState(() {});
-        }
-      },
-    )
-        .subscribe();
-=======
   void _subscribeMyHides() {
     final me = _myId;
     if (me == null) return;
@@ -331,7 +222,6 @@ class _ThreadScreenState extends State<ThreadScreen> {
           }
         },
       ).subscribe();
->>>>>>> 8b10b024d6d4d8e891332982e8f970c4b26dd8d7
   }
 
   void _scrollToBottomSoon() {
@@ -621,17 +511,8 @@ class _ThreadScreenState extends State<ThreadScreen> {
     }
     final id = m['id'] as String;
     try {
-<<<<<<< HEAD
-      // Time limit / ownership checks in SQL.
-      await _sb.rpc('unsend_message', params: {'p_id': id});
-
-      // Optimistic local change; realtime UPDATE will also arrive.
-      final nowIso = DateTime.now().toUtc().toIso8601String();
-      m['deleted_at'] = nowIso;
-=======
       await _sb.rpc('unsend_message', params: {'p_id': id});
       m['deleted_at'] = DateTime.now().toUtc().toIso8601String();
->>>>>>> 8b10b024d6d4d8e891332982e8f970c4b26dd8d7
       m['deleted_by'] = me;
       m['body'] = null;
       if (mounted) setState(() {});
@@ -688,43 +569,6 @@ class _ThreadScreenState extends State<ThreadScreen> {
     );
   }
 
-<<<<<<< HEAD
-  // Clear entire chat for me (sets/reset cutoff and removes older local msgs)
-  Future<void> _clearChatForMe() async {
-    final ok = await showDialog<bool>(
-      context: context,
-      builder: (_) => AlertDialog(
-        title: const Text('Clear chat?'),
-        content: const Text(
-          'This removes the conversation history for you. Others keep their messages.',
-        ),
-        actions: [
-          TextButton(onPressed: () => Navigator.pop(context, false), child: const Text('Cancel')),
-          FilledButton(onPressed: () => Navigator.pop(context, true), child: const Text('Clear')),
-        ],
-      ),
-    );
-    if (ok != true) return;
-
-    try {
-      await _sb.rpc('reset_thread', params: {'p_thread_id': _tid}); // <-- key change
-
-      // Update local cutoff and drop older messages
-      _cutoff = DateTime.now().toUtc();
-      _messages.removeWhere((m) {
-        final ts = DateTime.tryParse(m['created_at'] ?? '')?.toUtc();
-        return ts == null || !ts.isAfter(_cutoff!);
-      });
-      _hidden.clear(); // old hides no longer relevant
-      if (mounted) setState(() {});
-      _snack('Chat cleared');
-    } on PostgrestException catch (e) {
-      _snack(e.message);
-    } catch (e) {
-      _snack('Clear failed: $e');
-    }
-  }
-=======
   // ------------------ Inline download (per message) ------------------
   bool _isDownloading(String mid) => _dlCancels.containsKey(mid);
 
@@ -747,7 +591,6 @@ class _ThreadScreenState extends State<ThreadScreen> {
         final fromUrl = _fileNameFromUrl(url);
         name = fromUrl.contains('.') ? fromUrl : '$fromUrl.bin';
       }
->>>>>>> 8b10b024d6d4d8e891332982e8f970c4b26dd8d7
 
       final res = await Dio().get<List<int>>(
         url,
@@ -829,20 +672,9 @@ class _ThreadScreenState extends State<ThreadScreen> {
     );
   }
 
-<<<<<<< HEAD
-  // ---------- UI ----------
-
-  void _snack(String m) =>
-      ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(m)));
-
-  @override
-  Widget build(BuildContext context) {
-    // Filter with per-user hides (cutoff already applied at load time)
-=======
   // ------------------ UI ------------------
   @override
   Widget build(BuildContext context) {
->>>>>>> 8b10b024d6d4d8e891332982e8f970c4b26dd8d7
     final visible = _messages.where((m) => !_hidden.contains(m['id'])).toList();
 
     return Scaffold(
@@ -852,11 +684,7 @@ class _ThreadScreenState extends State<ThreadScreen> {
           IconButton(
             tooltip: 'Call',
             icon: const Icon(Icons.call_outlined),
-<<<<<<< HEAD
-            onPressed: _openCallSheet,
-=======
             onPressed: () => _openCallSheet(),
->>>>>>> 8b10b024d6d4d8e891332982e8f970c4b26dd8d7
           ),
           PopupMenuButton<String>(
             onSelected: (v) {
@@ -1143,14 +971,17 @@ class _ThreadScreenState extends State<ThreadScreen> {
                     : null);
 
                 return Align(
-                  alignment:
-                  isMe ? Alignment.centerRight : Alignment.centerLeft,
+                  alignment: isMe
+                      ? Alignment.centerRight
+                      : Alignment.centerLeft,
                   child: ConstrainedBox(
                     constraints:
                     const BoxConstraints(maxWidth: 320),
                     child: Card(
                       color: isMe
-                          ? Theme.of(context).colorScheme.primaryContainer
+                          ? Theme.of(context)
+                          .colorScheme
+                          .primaryContainer
                           : null,
                       margin: const EdgeInsets.symmetric(
                           vertical: 4, horizontal: 6),
@@ -1171,15 +1002,10 @@ class _ThreadScreenState extends State<ThreadScreen> {
                                   fontStyle: deleted
                                       ? FontStyle.italic
                                       : FontStyle.normal,
-<<<<<<< HEAD
-                                  color:
-                                  deleted ? Colors.grey.shade600 : null,
-=======
                                   color: textColor,
                                   decoration: isLink
                                       ? TextDecoration.underline
                                       : TextDecoration.none,
->>>>>>> 8b10b024d6d4d8e891332982e8f970c4b26dd8d7
                                 ),
                               ),
                               const SizedBox(height: 6),
