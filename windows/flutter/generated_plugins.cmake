@@ -6,8 +6,10 @@ list(APPEND FLUTTER_PLUGIN_LIST
   app_links
   audioplayers_windows
   connectivity_plus
+  file_saver
   file_selector_windows
   flutter_webrtc
+  geolocator_windows
   livekit_client
   permission_handler_windows
   share_plus
