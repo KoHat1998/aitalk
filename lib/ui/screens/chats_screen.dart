@@ -63,7 +63,7 @@ class _ChatsScreenState extends State<ChatsScreen> {
   Future<void> _load() async {
     setState(() => _loading = true);
     try {
-      // 1) server-side list
+      // 1) server-side list (expects columns from the updated list_threads())
       final res = await _sb.rpc('list_threads');
       final rows = (res as List?) ?? const [];
       _items = rows.cast<Map>().map((e) => Map<String, dynamic>.from(e)).toList();
@@ -103,18 +103,14 @@ class _ChatsScreenState extends State<ChatsScreen> {
     }
   }
 
-  // Title for a row (1v1 or group)
+  // Title for a row (1v1 or group) – uses new RPC column
   String _titleFor(Map<String, dynamic> row) {
-    final type = (row['type'] as String?) ?? '1v1';
-    if (type == '1v1') {
-      final dn = (row['other_display_name'] as String?)?.trim();
-      if (dn != null && dn.isNotEmpty) return dn;
-      final email = (row['other_email'] as String?) ?? '';
-      return email.isNotEmpty ? email.split('@').first : 'User';
-    }
-    return (row['name'] as String?)?.trim().isNotEmpty == true
-        ? row['name'] as String
-        : 'Group';
+    final title = (row['display_name_for_list'] as String?)?.trim();
+    if (title != null && title.isNotEmpty) return title;
+
+    // Fallbacks if RPC didn’t populate (shouldn’t happen with the updated SQL)
+    final isGroup = row['is_group'] == true;
+    return isGroup ? 'Group' : 'User';
   }
 
   /// Compute last visible message per thread, respecting:
@@ -131,21 +127,17 @@ class _ChatsScreenState extends State<ChatsScreen> {
       try {
         final cutoff = _cutoffs[tid];
 
-// Build the query with filters first, then order/limit
+        // Build the query with filters first, then order/limit
         var q = _sb
             .from('messages')
             .select('id, body, kind, deleted_at, created_at')
             .eq('thread_id', tid);
 
         if (cutoff != null) {
-          // use gt or gte as you prefer
           q = q.gte('created_at', cutoff.toIso8601String());
         }
 
-        final msgs = await q
-            .order('created_at', ascending: false)
-            .limit(20);
-
+        final msgs = await q.order('created_at', ascending: false).limit(20);
         final list = (msgs as List).cast<Map>();
 
         if (list.isEmpty) {
@@ -182,8 +174,7 @@ class _ChatsScreenState extends State<ChatsScreen> {
           }
         }
 
-        _previews[tid] =
-            chosen ?? (row['last_message'] as String?) ?? preview;
+        _previews[tid] = chosen ?? (row['last_message'] as String?) ?? preview;
       } catch (_) {
         _previews[tid] = (row['last_message'] as String?) ?? 'Say hi 👋';
       }
@@ -193,13 +184,15 @@ class _ChatsScreenState extends State<ChatsScreen> {
   Future<void> _openThread(Map<String, dynamic> row) async {
     final threadId = (row['thread_id'] as String?) ?? row['thread_id'].toString();
     final title = _titleFor(row);
+    final isGroup = row['is_group'] == true;
+
     await Navigator.pushNamed(
       context,
       AppRoutes.thread,
       arguments: ThreadArgs(
         threadId: threadId,
         title: title,
-        isGroup: (row['type'] == 'group'),
+        isGroup: isGroup,
       ),
     );
     if (mounted) _load(); // refresh after returning
@@ -211,28 +204,24 @@ class _ChatsScreenState extends State<ChatsScreen> {
 
     final ok = await showDialog<bool>(
       context: context,
-      builder: (_) => AlertDialog(
-        title: const Text('Clear chat history?'),
-        content: const Text(
+      builder: (_) => const AlertDialog(
+        title: Text('Clear chat history?'),
+        content: Text(
           'This clears your copy of the conversation and removes it from the list. '
               'New messages will show up as a fresh chat; old messages will not reappear.',
         ),
-        actions: [
-          TextButton(onPressed: () => Navigator.pop(context, false), child: const Text('Cancel')),
-          FilledButton(onPressed: () => Navigator.pop(context, true), child: const Text('Clear')),
-        ],
       ),
     );
 
     if (ok != true) return;
 
     try {
-      // Server: set/reset cutoff and (optionally) hide the thread now
       await _sb.rpc('reset_thread', params: {'p_thread_id': threadId});
 
-      // Local: remove from list & previews
       _items.removeWhere(
-            (it) => ((it['thread_id'] as String?) ?? it['thread_id'].toString()) == threadId,
+            (it) =>
+        ((it['thread_id'] as String?) ?? it['thread_id'].toString()) ==
+            threadId,
       );
       _previews.remove(threadId);
       _cutoffs.remove(threadId);
@@ -271,14 +260,21 @@ class _ChatsScreenState extends State<ChatsScreen> {
           itemBuilder: (context, i) {
             final row = _items[i];
             final title = _titleFor(row);
-            final tid = (row['thread_id'] as String?) ?? row['thread_id'].toString();
-            final subtitle = _previews[tid] ?? (row['last_message'] as String?) ?? 'Say hi 👋';
+            final tid =
+                (row['thread_id'] as String?) ?? row['thread_id'].toString();
+            final subtitle =
+                _previews[tid] ?? (row['last_message'] as String?) ?? 'Say hi 👋';
 
             final tile = Card(
               child: ListTile(
-                leading: Avatar(name: title),
+                leading: Avatar(
+                  name: title,
+                  // If your Avatar supports a url prop, you can pass:
+                  // url: row['item_avatar_url'] as String?,
+                ),
                 title: Text(title, maxLines: 1, overflow: TextOverflow.ellipsis),
-                subtitle: Text(subtitle, maxLines: 1, overflow: TextOverflow.ellipsis),
+                subtitle:
+                Text(subtitle, maxLines: 1, overflow: TextOverflow.ellipsis),
                 onTap: () => _openThread(row),
                 trailing: PopupMenuButton<String>(
                   onSelected: (v) {
