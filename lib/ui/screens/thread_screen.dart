@@ -313,7 +313,8 @@ class _ThreadScreenState extends State<ThreadScreen> {
             left: 16,
             right: 16,
             bottom: top ? null : (80 + MediaQuery.of(context).viewInsets.bottom),
-            top: top ? (kToolbarHeight + 60) : null,
+            // a little closer to the AppBar than default
+            top: top ? (kToolbarHeight + 8) : null,
             child: Material(
               elevation: 8,
               borderRadius: BorderRadius.circular(14),
@@ -358,7 +359,7 @@ class _ThreadScreenState extends State<ThreadScreen> {
             left: 16,
             right: 16,
             bottom: top ? null : (80 + MediaQuery.of(context).viewInsets.bottom),
-            top: top ? (kToolbarHeight + 24) : null,
+            top: top ? (kToolbarHeight + 8) : null,
             child: Material(
               elevation: 8,
               borderRadius: BorderRadius.circular(14),
@@ -417,7 +418,7 @@ class _ThreadScreenState extends State<ThreadScreen> {
     }
   }
 
-  // ------------------ ONLY CHANGE HERE ------------------
+  // ---- Upload files: fixed "Uploading…" under AppBar (no 1/N)
   Future<void> _sendFiles(List<File> files) async {
     final me = _myId;
     if (me == null) {
@@ -426,7 +427,6 @@ class _ThreadScreenState extends State<ThreadScreen> {
     }
     if (files.isEmpty) return;
 
-    // Fixed "Uploading…" overlay just under the AppBar (no 1/N)
     final close = _showBusyOverlay(label: 'Uploading…', top: true);
 
     try {
@@ -719,20 +719,15 @@ class _ThreadScreenState extends State<ThreadScreen> {
                 // timestamp
                 final raw = m['created_at'];
                 DateTime ts = DateTime.now();
-                if (raw is String) {
-                  ts = DateTime.tryParse(raw) ?? ts;
-                } else if (raw is DateTime) {
-                  ts = raw;
-                }
+                if (raw is String) ts = DateTime.tryParse(raw) ?? ts;
+                else if (raw is DateTime) ts = raw;
 
-                // 1) Map preview (from columns or maps URL)
+                // 1) Map preview
                 final latCol = (m['location_lat'] as num?)?.toDouble();
                 final lngCol = (m['location_lng'] as num?)?.toDouble();
                 LatLng? point;
                 if (!deleted) {
-                  if (kind == 'location' &&
-                      latCol != null &&
-                      lngCol != null) {
+                  if (kind == 'location' && latCol != null && lngCol != null) {
                     point = LatLng(latCol, lngCol);
                   } else if (_isUrl(body)) {
                     point = _latLngFromMapsUrl(body);
@@ -742,23 +737,18 @@ class _ThreadScreenState extends State<ThreadScreen> {
                   final mapsUrl =
                       'https://www.google.com/maps/search/?api=1&query=${point.latitude},${point.longitude}';
                   return Align(
-                    alignment: isMe
-                        ? Alignment.centerRight
-                        : Alignment.centerLeft,
+                    alignment: isMe ? Alignment.centerRight : Alignment.centerLeft,
                     child: ConstrainedBox(
                       constraints: const BoxConstraints(maxWidth: 320),
                       child: Card(
-                        margin: const EdgeInsets.symmetric(
-                            vertical: 6, horizontal: 6),
+                        margin: const EdgeInsets.symmetric(vertical: 6, horizontal: 6),
                         clipBehavior: Clip.antiAlias,
-                        shape: RoundedRectangleBorder(
-                            borderRadius: BorderRadius.circular(14)),
+                        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(14)),
                         child: InkWell(
                           onTap: () => _openUrl(mapsUrl),
                           onLongPress: () => _showMessageActions(m),
                           child: Column(
-                            crossAxisAlignment:
-                            CrossAxisAlignment.stretch,
+                            crossAxisAlignment: CrossAxisAlignment.stretch,
                             children: [
                               SizedBox(
                                 height: 160,
@@ -766,24 +756,16 @@ class _ThreadScreenState extends State<ThreadScreen> {
                                   options: MapOptions(
                                     initialCenter: point,
                                     initialZoom: 15,
-                                    interactionOptions:
-                                    const InteractionOptions(
+                                    interactionOptions: const InteractionOptions(
                                       flags: InteractiveFlag.none,
                                     ),
                                   ),
                                   children: [
-                                    // Use Carto tiles to avoid OSM "blocked" banners
                                     TileLayer(
                                       urlTemplate:
                                       'https://{s}.basemaps.cartocdn.com/light_all/{z}/{x}/{y}{r}.png',
-                                      subdomains: const [
-                                        'a',
-                                        'b',
-                                        'c',
-                                        'd'
-                                      ],
-                                      userAgentPackageName:
-                                      'com.yourcompany.yourapp',
+                                      subdomains: const ['a', 'b', 'c', 'd'],
+                                      userAgentPackageName: 'com.yourcompany.yourapp',
                                     ),
                                     MarkerLayer(markers: [
                                       Marker(
@@ -801,11 +783,8 @@ class _ThreadScreenState extends State<ThreadScreen> {
                                 ),
                               ),
                               Container(
-                                color: Theme.of(context)
-                                    .colorScheme
-                                    .surface,
-                                padding: const EdgeInsets.symmetric(
-                                    horizontal: 12, vertical: 8),
+                                color: Theme.of(context).colorScheme.surface,
+                                padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
                                 child: Row(
                                   children: [
                                     const Icon(Icons.map, size: 18),
@@ -815,20 +794,15 @@ class _ThreadScreenState extends State<ThreadScreen> {
                                         'Open in Google Maps',
                                         overflow: TextOverflow.ellipsis,
                                         style: TextStyle(
-                                          decoration:
-                                          TextDecoration.underline,
-                                          color: Theme.of(context)
-                                              .colorScheme
-                                              .primary,
+                                          decoration: TextDecoration.underline,
+                                          color: Theme.of(context).colorScheme.primary,
                                           fontWeight: FontWeight.w600,
                                         ),
                                       ),
                                     ),
                                     Text(
                                       timeOfDay(ts),
-                                      style: TextStyle(
-                                          fontSize: 11,
-                                          color: Colors.grey.shade600),
+                                      style: TextStyle(fontSize: 11, color: Colors.grey.shade600),
                                     ),
                                   ],
                                 ),
@@ -843,8 +817,7 @@ class _ThreadScreenState extends State<ThreadScreen> {
 
                 // 2) File/media message card (URL with extension)
                 final isLink = !deleted && _isUrl(body);
-                final looksFile = isLink &&
-                    _ext(_fileNameFromUrl(body)).isNotEmpty;
+                final looksFile = isLink && _ext(_fileNameFromUrl(body)).isNotEmpty;
 
                 if (!deleted && looksFile) {
                   final name = _fileNameFromUrl(body);
@@ -853,109 +826,113 @@ class _ThreadScreenState extends State<ThreadScreen> {
                   final mid = m['id'] as String;
                   final downloading = _isDownloading(mid);
                   final prog = _dlProgress[mid] ?? 0.0;
-                  final pct = (prog * 100)
-                      .clamp(0, 100)
-                      .toStringAsFixed(0);
+                  final pct = (prog * 100).clamp(0, 100).toStringAsFixed(0);
 
                   return Align(
-                    alignment: isMe
-                        ? Alignment.centerRight
-                        : Alignment.centerLeft,
+                    alignment: isMe ? Alignment.centerRight : Alignment.centerLeft,
                     child: ConstrainedBox(
                       constraints: const BoxConstraints(maxWidth: 320),
                       child: Card(
-                        margin: const EdgeInsets.symmetric(
-                            vertical: 6, horizontal: 6),
+                        margin: const EdgeInsets.symmetric(vertical: 6, horizontal: 6),
+                        clipBehavior: Clip.antiAlias,
                         child: InkWell(
                           onLongPress: () => _showMessageActions(m),
                           onTap: () => _openUrl(body),
                           borderRadius: BorderRadius.circular(12),
-                          child: Padding(
-                            padding: const EdgeInsets.all(12),
-                            child: Column(
-                              crossAxisAlignment:
-                              CrossAxisAlignment.start,
-                              children: [
-                                Row(
-                                  crossAxisAlignment:
-                                  CrossAxisAlignment.start,
-                                  children: [
-                                    Icon(
-                                      isImg
-                                          ? Icons.image_outlined
-                                          : isVid
-                                          ? Icons.videocam_outlined
-                                          : Icons
-                                          .insert_drive_file_outlined,
-                                      size: 24,
-                                    ),
-                                    const SizedBox(width: 10),
-                                    Expanded(
-                                      child: Text(
-                                        name,
-                                        maxLines: 2,
-                                        overflow: TextOverflow.ellipsis,
-                                        style: const TextStyle(
-                                            fontWeight: FontWeight.w600),
+                          child: Column(
+                            crossAxisAlignment: CrossAxisAlignment.start,
+                            children: [
+                              if (isImg)
+                              // --- Image preview ---
+                                Image.network(
+                                  body,
+                                  height: 180,
+                                  width: double.infinity,
+                                  fit: BoxFit.cover,
+                                  errorBuilder: (_, __, ___) => Container(
+                                    height: 180,
+                                    color: Colors.grey.shade300,
+                                    child: const Center(child: Icon(Icons.broken_image)),
+                                  ),
+                                )
+                              else
+                              // Fallback: icon + filename header
+                                Padding(
+                                  padding: const EdgeInsets.all(12),
+                                  child: Row(
+                                    crossAxisAlignment: CrossAxisAlignment.start,
+                                    children: [
+                                      Icon(
+                                        isVid
+                                            ? Icons.videocam_outlined
+                                            : Icons.insert_drive_file_outlined,
+                                        size: 24,
                                       ),
+                                      const SizedBox(width: 10),
+                                      Expanded(
+                                        child: Text(
+                                          name,
+                                          maxLines: 2,
+                                          overflow: TextOverflow.ellipsis,
+                                          style: const TextStyle(fontWeight: FontWeight.w600),
+                                        ),
+                                      ),
+                                    ],
+                                  ),
+                                ),
+
+                              const SizedBox(height: 8),
+
+                              // Inline progress OR actions
+                              Padding(
+                                padding: const EdgeInsets.fromLTRB(12, 0, 12, 12),
+                                child: downloading
+                                    ? Column(
+                                  children: [
+                                    LinearProgressIndicator(value: prog == 0 ? null : prog),
+                                    const SizedBox(height: 8),
+                                    Row(
+                                      children: [
+                                        Text('$pct%',
+                                            style: Theme.of(context).textTheme.labelMedium),
+                                        const Spacer(),
+                                        TextButton.icon(
+                                          icon: const Icon(Icons.close),
+                                          label: const Text('Cancel'),
+                                          onPressed: () => _cancelDownload(mid),
+                                        ),
+                                      ],
+                                    ),
+                                  ],
+                                )
+                                    : Row(
+                                  children: [
+                                    _iconPill(
+                                      icon: Icons.download_rounded,
+                                      tooltip: 'Download',
+                                      onPressed: () => _startDownload(
+                                        messageId: mid,
+                                        url: body,
+                                        suggestedName: name,
+                                      ),
+                                    ),
+                                    const SizedBox(width: 6),
+                                    _iconPill(
+                                      icon: Icons.share_outlined,
+                                      tooltip: 'Share',
+                                      onPressed: () =>
+                                          Share.share(body, subject: name),
+                                    ),
+                                    const Spacer(),
+                                    Text(
+                                      timeOfDay(ts),
+                                      style: TextStyle(
+                                          fontSize: 11, color: Colors.grey.shade600),
                                     ),
                                   ],
                                 ),
-                                const SizedBox(height: 10),
-
-                                // Inline progress OR actions
-                                if (downloading) ...[
-                                  LinearProgressIndicator(
-                                      value: prog == 0 ? null : prog),
-                                  const SizedBox(height: 8),
-                                  Row(
-                                    children: [
-                                      Text('$pct%',
-                                          style: Theme.of(context)
-                                              .textTheme
-                                              .labelMedium),
-                                      const Spacer(),
-                                      TextButton.icon(
-                                        icon: const Icon(Icons.close),
-                                        label: const Text('Cancel'),
-                                        onPressed: () =>
-                                            _cancelDownload(mid),
-                                      ),
-                                    ],
-                                  ),
-                                ] else ...[
-                                  Row(
-                                    children: [
-                                      _iconPill(
-                                        icon: Icons.download_rounded,
-                                        tooltip: 'Download',
-                                        onPressed: () => _startDownload(
-                                          messageId: mid,
-                                          url: body,
-                                          suggestedName: name,
-                                        ),
-                                      ),
-                                      const SizedBox(width: 6),
-                                      _iconPill(
-                                        icon: Icons.share_outlined,
-                                        tooltip: 'Share',
-                                        onPressed: () => Share.share(
-                                            body,
-                                            subject: name),
-                                      ),
-                                      const Spacer(),
-                                      Text(
-                                        timeOfDay(ts),
-                                        style: TextStyle(
-                                            fontSize: 11,
-                                            color:
-                                            Colors.grey.shade600),
-                                      ),
-                                    ],
-                                  ),
-                                ],
-                              ],
-                            ),
+                              ),
+                            ],
                           ),
                         ),
                       ),
@@ -966,25 +943,15 @@ class _ThreadScreenState extends State<ThreadScreen> {
                 // 3) Regular text bubble (includes link-only messages)
                 final Color? textColor = deleted
                     ? Colors.grey.shade600
-                    : (isLink
-                    ? Theme.of(context).colorScheme.primary
-                    : null);
+                    : (isLink ? Theme.of(context).colorScheme.primary : null);
 
                 return Align(
-                  alignment: isMe
-                      ? Alignment.centerRight
-                      : Alignment.centerLeft,
+                  alignment: isMe ? Alignment.centerRight : Alignment.centerLeft,
                   child: ConstrainedBox(
-                    constraints:
-                    const BoxConstraints(maxWidth: 320),
+                    constraints: const BoxConstraints(maxWidth: 320),
                     child: Card(
-                      color: isMe
-                          ? Theme.of(context)
-                          .colorScheme
-                          .primaryContainer
-                          : null,
-                      margin: const EdgeInsets.symmetric(
-                          vertical: 4, horizontal: 6),
+                      color: isMe ? Theme.of(context).colorScheme.primaryContainer : null,
+                      margin: const EdgeInsets.symmetric(vertical: 4, horizontal: 6),
                       child: InkWell(
                         onLongPress: () => _showMessageActions(m),
                         onTap: isLink ? () => _openUrl(body) : null,
@@ -992,16 +959,13 @@ class _ThreadScreenState extends State<ThreadScreen> {
                         child: Padding(
                           padding: const EdgeInsets.all(12),
                           child: Column(
-                            crossAxisAlignment:
-                            CrossAxisAlignment.start,
+                            crossAxisAlignment: CrossAxisAlignment.start,
                             children: [
                               Text(
                                 deleted ? 'Message deleted' : body,
                                 style: TextStyle(
                                   fontSize: 15,
-                                  fontStyle: deleted
-                                      ? FontStyle.italic
-                                      : FontStyle.normal,
+                                  fontStyle: deleted ? FontStyle.italic : FontStyle.normal,
                                   color: textColor,
                                   decoration: isLink
                                       ? TextDecoration.underline
@@ -1011,9 +975,7 @@ class _ThreadScreenState extends State<ThreadScreen> {
                               const SizedBox(height: 6),
                               Text(
                                 timeOfDay(ts),
-                                style: TextStyle(
-                                    fontSize: 11,
-                                    color: Colors.grey.shade600),
+                                style: TextStyle(fontSize: 11, color: Colors.grey.shade600),
                               ),
                             ],
                           ),
@@ -1034,8 +996,7 @@ class _ThreadScreenState extends State<ThreadScreen> {
               required double lng,
               double? accuracyM,
             }) {
-              return _sendLocation(
-                  lat: lat, lng: lng, accuracyM: accuracyM);
+              return _sendLocation(lat: lat, lng: lng, accuracyM: accuracyM);
             },
           ),
         ],
