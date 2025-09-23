@@ -3,7 +3,6 @@ import 'package:flutter/material.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
 
 import '../../core/app_routes.dart';
-// We navigate via the ringing flow, not directly to CallScreen.
 import 'outgoing_call_screen.dart' show OutgoingCallArgs;
 
 class ThreadArgs {
@@ -72,7 +71,7 @@ class _ThreadScreenState extends State<ThreadScreen> {
   Future<void> _load() async {
     setState(() => _loading = true);
     try {
-      // 0) Fetch/reset cutoff for this user+thread
+      // 0) Fetch cutoff for this user+thread
       await _loadCutoff();
 
       // 1) Load messages (include deleted fields), filtered by cutoff
@@ -86,8 +85,7 @@ class _ThreadScreenState extends State<ThreadScreen> {
         q = q.gte('created_at', _cutoff!.toUtc().toIso8601String());
       }
 
-      final rows =
-      await q.order('created_at', ascending: true); // order last
+      final rows = await q.order('created_at', ascending: true);
 
       _messages
         ..clear()
@@ -131,7 +129,6 @@ class _ThreadScreenState extends State<ThreadScreen> {
     _hidden.clear();
     if (ids.isEmpty) return;
     try {
-      // .or("message_id.eq.id1,message_id.eq.id2,...")
       final res = await _sb
           .from('message_hides')
           .select('message_id')
@@ -141,7 +138,7 @@ class _ThreadScreenState extends State<ThreadScreen> {
         if (mid != null) _hidden.add(mid);
       }
     } catch (_) {
-      // Non-fatal; just means hides won't filter this pass
+      // Non-fatal
     }
   }
 
@@ -165,17 +162,17 @@ class _ThreadScreenState extends State<ThreadScreen> {
         final rec = payload.newRecord;
         if (rec == null) return;
 
-        // Respect cutoff: ignore historical inserts (e.g., backfills)
+        // Respect cutoff: ignore anything created <= cutoff
         final createdAtStr = rec['created_at'] as String?;
         if (_cutoff != null &&
             createdAtStr != null &&
-            (DateTime.tryParse(createdAtStr)?.toUtc() ?? DateTime.now().toUtc())
+            (DateTime.tryParse(createdAtStr)?.toUtc() ??
+                DateTime.now().toUtc())
                 .isBefore(_cutoff!)) {
           return;
         }
 
-        final m = Map<String, dynamic>.from(rec);
-        _messages.add(m);
+        _messages.add(Map<String, dynamic>.from(rec));
         if (mounted) setState(() {});
         _scrollToBottomSoon();
       },
@@ -198,7 +195,8 @@ class _ThreadScreenState extends State<ThreadScreen> {
         final createdAtStr = rec['created_at'] as String?;
         if (_cutoff != null &&
             createdAtStr != null &&
-            (DateTime.tryParse(createdAtStr)?.toUtc() ?? DateTime.now().toUtc())
+            (DateTime.tryParse(createdAtStr)?.toUtc() ??
+                DateTime.now().toUtc())
                 .isBefore(_cutoff!)) {
           return;
         }
@@ -214,7 +212,7 @@ class _ThreadScreenState extends State<ThreadScreen> {
         .subscribe();
   }
 
-  // Realtime for "delete for me" performed on another device of this same user
+  // Realtime for "delete for me" on another device of the same user
   void _subscribeMyHides() {
     final me = _myId;
     if (me == null) return;
@@ -237,9 +235,7 @@ class _ThreadScreenState extends State<ThreadScreen> {
         final mid = rec['message_id'] as String?;
         if (mid == null) return;
 
-        // Only hide if that message belongs to this thread AND is after cutoff
-        final idx = _messages.indexWhere((m) => m['id'] == mid);
-        if (idx != -1) {
+        if (_messages.any((m) => m['id'] == mid)) {
           _hidden.add(mid);
           if (mounted) setState(() {});
         }
@@ -309,17 +305,17 @@ class _ThreadScreenState extends State<ThreadScreen> {
     final id = m['id'] as String;
 
     try {
-      // All time limits / ownership checks are enforced in SQL.
+      // Time limit / ownership checks in SQL.
       await _sb.rpc('unsend_message', params: {'p_id': id});
 
-      // Optimistic local change; backend will also push a realtime UPDATE.
+      // Optimistic local change; realtime UPDATE will also arrive.
       final nowIso = DateTime.now().toUtc().toIso8601String();
       m['deleted_at'] = nowIso;
       m['deleted_by'] = me;
       m['body'] = null;
       if (mounted) setState(() {});
     } on PostgrestException catch (e) {
-      _snack(e.message); // e.g., "You can only unsend within 2 minutes"
+      _snack(e.message);
     } catch (e) {
       _snack('Delete failed: $e');
     }
@@ -368,7 +364,8 @@ class _ThreadScreenState extends State<ThreadScreen> {
       builder: (_) => AlertDialog(
         title: const Text('Clear chat?'),
         content: const Text(
-            'This removes the conversation history for you. Others keep their messages.'),
+          'This removes the conversation history for you. Others keep their messages.',
+        ),
         actions: [
           TextButton(onPressed: () => Navigator.pop(context, false), child: const Text('Cancel')),
           FilledButton(onPressed: () => Navigator.pop(context, true), child: const Text('Clear')),
@@ -378,7 +375,8 @@ class _ThreadScreenState extends State<ThreadScreen> {
     if (ok != true) return;
 
     try {
-      await _sb.rpc('hide_thread', params: {'p_thread_id': _tid});
+      await _sb.rpc('reset_thread', params: {'p_thread_id': _tid}); // <-- key change
+
       // Update local cutoff and drop older messages
       _cutoff = DateTime.now().toUtc();
       _messages.removeWhere((m) {
@@ -492,14 +490,12 @@ class _ThreadScreenState extends State<ThreadScreen> {
   // ---------- UI ----------
 
   void _snack(String m) =>
-      ScaffoldMessenger.of(context)
-          .showSnackBar(SnackBar(content: Text(m)));
+      ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(m)));
 
   @override
   Widget build(BuildContext context) {
     // Filter with per-user hides (cutoff already applied at load time)
-    final visible =
-    _messages.where((m) => !_hidden.contains(m['id'])).toList();
+    final visible = _messages.where((m) => !_hidden.contains(m['id'])).toList();
 
     return Scaffold(
       appBar: AppBar(
@@ -507,8 +503,8 @@ class _ThreadScreenState extends State<ThreadScreen> {
         actions: [
           IconButton(
             tooltip: 'Call',
-            icon: const Icon(Icons.call_outlined), // audio-first affordance
-            onPressed: _openCallSheet,             // choose Audio/Video
+            icon: const Icon(Icons.call_outlined),
+            onPressed: _openCallSheet,
           ),
           PopupMenuButton<String>(
             onSelected: (v) {
@@ -544,16 +540,13 @@ class _ThreadScreenState extends State<ThreadScreen> {
                     DateTime.now();
 
                 return Align(
-                  alignment: isMe
-                      ? Alignment.centerRight
-                      : Alignment.centerLeft,
+                  alignment:
+                  isMe ? Alignment.centerRight : Alignment.centerLeft,
                   child: ConstrainedBox(
                     constraints: const BoxConstraints(maxWidth: 320),
                     child: Card(
                       color: isMe
-                          ? Theme.of(context)
-                          .colorScheme
-                          .primaryContainer
+                          ? Theme.of(context).colorScheme.primaryContainer
                           : null,
                       margin: const EdgeInsets.symmetric(
                           vertical: 4, horizontal: 6),
@@ -572,9 +565,8 @@ class _ThreadScreenState extends State<ThreadScreen> {
                                   fontStyle: deleted
                                       ? FontStyle.italic
                                       : FontStyle.normal,
-                                  color: deleted
-                                      ? Colors.grey.shade600
-                                      : null,
+                                  color:
+                                  deleted ? Colors.grey.shade600 : null,
                                 ),
                               ),
                               const SizedBox(height: 6),
