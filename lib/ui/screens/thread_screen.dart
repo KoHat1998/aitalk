@@ -1,10 +1,23 @@
+// lib/ui/screens/thread_screen.dart
+
 import 'dart:async';
+import 'dart:io';
+import 'dart:typed_data';
+
+import 'package:dio/dio.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter_map/flutter_map.dart';
+import 'package:flutter_file_dialog/flutter_file_dialog.dart';
+import 'package:latlong2/latlong.dart';
+import 'package:path/path.dart' as p;
+import 'package:path_provider/path_provider.dart';
+import 'package:share_plus/share_plus.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
+import 'package:url_launcher/url_launcher.dart';
 
 import '../../core/app_routes.dart';
-// We navigate via the ringing flow, not directly to CallScreen.
 import 'outgoing_call_screen.dart' show OutgoingCallArgs;
+import '../widgets/chat_input_bar.dart';
 
 class ThreadArgs {
   final String threadId;
@@ -31,21 +44,21 @@ class _ThreadScreenState extends State<ThreadScreen> {
   late final String _tid;
   late final String _title;
 
-  final _composer = TextEditingController();
   final _scroll = ScrollController();
 
-  RealtimeChannel? _chan;      // messages realtime
-  RealtimeChannel? _hidesChan; // per-user hides realtime
+  RealtimeChannel? _chan;
+  RealtimeChannel? _hidesChan;
   bool _loading = true;
 
-  // All messages (ordered asc)
-  final List<Map<String, dynamic>> _messages = [];
-  // Per-user hidden message IDs (Delete for me)
+  final List<Map<String, dynamic>> _messages = []; // ordered asc
   final Set<String> _hidden = {};
-
-  // Per-user cutoff: messages at/older than this are ignored for this user
   DateTime? _cutoff;
 
+  // Per-message download state
+  final Map<String, double> _dlProgress = {}; // 0..1
+  final Map<String, CancelToken> _dlCancels = {};
+
+  static const String _storageBucket = 'chat_uploads';
   String? get _myId => _sb.auth.currentUser?.id;
 
   @override
@@ -60,40 +73,35 @@ class _ThreadScreenState extends State<ThreadScreen> {
 
   @override
   void dispose() {
-    _composer.dispose();
     _scroll.dispose();
     if (_chan != null) _sb.removeChannel(_chan!);
     if (_hidesChan != null) _sb.removeChannel(_hidesChan!);
     super.dispose();
   }
 
-  // ---------- Data loading ----------
-
+  // ------------------ Load ------------------
   Future<void> _load() async {
     setState(() => _loading = true);
     try {
-      // 0) Fetch/reset cutoff for this user+thread
       await _loadCutoff();
 
-      // 1) Load messages (include deleted fields), filtered by cutoff
       var q = _sb
           .from('messages')
           .select(
-          'id, sender_id, kind, body, created_at, deleted_at, deleted_by')
+        'id, sender_id, kind, body, created_at, deleted_at, deleted_by, '
+            'location_lat, location_lng, location_accuracy_m',
+      )
           .eq('thread_id', _tid);
 
       if (_cutoff != null) {
         q = q.gte('created_at', _cutoff!.toUtc().toIso8601String());
       }
 
-      final rows =
-      await q.order('created_at', ascending: true); // order last
-
+      final rows = await q.order('created_at', ascending: true);
       _messages
         ..clear()
         ..addAll((rows as List).cast<Map<String, dynamic>>());
 
-      // 2) Load per-user hides for these messages
       await _loadMyHidesFor(_messages.map((m) => m['id'] as String).toList());
 
       if (mounted) setState(() => _loading = false);
@@ -109,21 +117,17 @@ class _ThreadScreenState extends State<ThreadScreen> {
     try {
       final me = _myId;
       if (me == null) return;
-
       final row = await _sb
           .from('thread_resets')
           .select('cutoff_at')
           .eq('thread_id', _tid)
           .eq('user_id', me)
           .maybeSingle();
-
-      if (row != null && row['cutoff_at'] != null) {
-        _cutoff = DateTime.tryParse(row['cutoff_at'] as String)?.toUtc();
-      } else {
-        _cutoff = null;
-      }
+      _cutoff = (row?['cutoff_at'] as String?) != null
+          ? DateTime.tryParse(row!['cutoff_at'] as String)?.toUtc()
+          : null;
     } catch (_) {
-      _cutoff = null; // fail-open
+      _cutoff = null;
     }
   }
 
@@ -131,7 +135,6 @@ class _ThreadScreenState extends State<ThreadScreen> {
     _hidden.clear();
     if (ids.isEmpty) return;
     try {
-      // .or("message_id.eq.id1,message_id.eq.id2,...")
       final res = await _sb
           .from('message_hides')
           .select('message_id')
@@ -140,112 +143,85 @@ class _ThreadScreenState extends State<ThreadScreen> {
         final mid = r['message_id'] as String?;
         if (mid != null) _hidden.add(mid);
       }
-    } catch (_) {
-      // Non-fatal; just means hides won't filter this pass
-    }
+    } catch (_) {/* ignore */}
   }
 
-  // ---------- Realtime ----------
-
+  // ------------------ Realtime ------------------
   void _subscribeMessages() {
-    _chan = _sb.channel('realtime:messages:$_tid');
-
-    // INSERTS (new messages)
-    _chan!
-        .onPostgresChanges(
-      event: PostgresChangeEvent.insert,
-      schema: 'public',
-      table: 'messages',
-      filter: PostgresChangeFilter(
-        type: PostgresChangeFilterType.eq,
-        column: 'thread_id',
-        value: _tid,
-      ),
-      callback: (payload) {
-        final rec = payload.newRecord;
-        if (rec == null) return;
-
-        // Respect cutoff: ignore historical inserts (e.g., backfills)
-        final createdAtStr = rec['created_at'] as String?;
-        if (_cutoff != null &&
-            createdAtStr != null &&
-            (DateTime.tryParse(createdAtStr)?.toUtc() ?? DateTime.now().toUtc())
-                .isBefore(_cutoff!)) {
-          return;
-        }
-
-        final m = Map<String, dynamic>.from(rec);
-        _messages.add(m);
-        if (mounted) setState(() {});
-        _scrollToBottomSoon();
-      },
-    )
-    // UPDATES (soft delete / edits)
-        .onPostgresChanges(
-      event: PostgresChangeEvent.update,
-      schema: 'public',
-      table: 'messages',
-      filter: PostgresChangeFilter(
-        type: PostgresChangeFilterType.eq,
-        column: 'thread_id',
-        value: _tid,
-      ),
-      callback: (payload) {
-        final rec = payload.newRecord;
-        if (rec == null) return;
-
-        // Respect cutoff for updates too
-        final createdAtStr = rec['created_at'] as String?;
-        if (_cutoff != null &&
-            createdAtStr != null &&
-            (DateTime.tryParse(createdAtStr)?.toUtc() ?? DateTime.now().toUtc())
-                .isBefore(_cutoff!)) {
-          return;
-        }
-
-        final id = rec['id'];
-        final idx = _messages.indexWhere((m) => m['id'] == id);
-        if (idx != -1) {
-          _messages[idx] = Map<String, dynamic>.from(rec);
+    _chan = _sb.channel('realtime:messages:$_tid')
+      ..onPostgresChanges(
+        event: PostgresChangeEvent.insert,
+        schema: 'public',
+        table: 'messages',
+        filter: PostgresChangeFilter(
+          type: PostgresChangeFilterType.eq,
+          column: 'thread_id',
+          value: _tid,
+        ),
+        callback: (payload) {
+          final rec = payload.newRecord;
+          if (rec == null) return;
+          final createdAtStr = rec['created_at'] as String?;
+          if (_cutoff != null &&
+              createdAtStr != null &&
+              (DateTime.tryParse(createdAtStr)?.toUtc() ?? DateTime.now().toUtc())
+                  .isBefore(_cutoff!)) {
+            return;
+          }
+          _messages.add(Map<String, dynamic>.from(rec));
           if (mounted) setState(() {});
-        }
-      },
-    )
-        .subscribe();
+          _scrollToBottomSoon();
+        },
+      )
+      ..onPostgresChanges(
+        event: PostgresChangeEvent.update,
+        schema: 'public',
+        table: 'messages',
+        filter: PostgresChangeFilter(
+          type: PostgresChangeFilterType.eq,
+          column: 'thread_id',
+          value: _tid,
+        ),
+        callback: (payload) {
+          final rec = payload.newRecord;
+          if (rec == null) return;
+          final createdAtStr = rec['created_at'] as String?;
+          if (_cutoff != null &&
+              createdAtStr != null &&
+              (DateTime.tryParse(createdAtStr)?.toUtc() ?? DateTime.now().toUtc())
+                  .isBefore(_cutoff!)) {
+            return;
+          }
+          final id = rec['id'];
+          final idx = _messages.indexWhere((m) => m['id'] == id);
+          if (idx != -1) {
+            _messages[idx] = Map<String, dynamic>.from(rec);
+            if (mounted) setState(() {});
+          }
+        },
+      ).subscribe();
   }
 
-  // Realtime for "delete for me" performed on another device of this same user
   void _subscribeMyHides() {
     final me = _myId;
     if (me == null) return;
-
-    _hidesChan = _sb.channel('realtime:message_hides:$me');
-
-    _hidesChan!
-        .onPostgresChanges(
-      event: PostgresChangeEvent.insert,
-      schema: 'public',
-      table: 'message_hides',
-      filter: PostgresChangeFilter(
-        type: PostgresChangeFilterType.eq,
-        column: 'user_id',
-        value: me,
-      ),
-      callback: (payload) {
-        final rec = payload.newRecord;
-        if (rec == null) return;
-        final mid = rec['message_id'] as String?;
-        if (mid == null) return;
-
-        // Only hide if that message belongs to this thread AND is after cutoff
-        final idx = _messages.indexWhere((m) => m['id'] == mid);
-        if (idx != -1) {
-          _hidden.add(mid);
-          if (mounted) setState(() {});
-        }
-      },
-    )
-        .subscribe();
+    _hidesChan = _sb.channel('realtime:message_hides:$me')
+      ..onPostgresChanges(
+        event: PostgresChangeEvent.insert,
+        schema: 'public',
+        table: 'message_hides',
+        filter: PostgresChangeFilter(
+            type: PostgresChangeFilterType.eq, column: 'user_id', value: me),
+        callback: (payload) {
+          final mid = payload.newRecord?['message_id'] as String?;
+          if (mid == null) return;
+          final idx = _messages.indexWhere((m) => m['id'] == mid);
+          if (idx != -1) {
+            _hidden.add(mid);
+            if (mounted) setState(() {});
+          }
+        },
+      ).subscribe();
   }
 
   void _scrollToBottomSoon() {
@@ -259,45 +235,272 @@ class _ThreadScreenState extends State<ThreadScreen> {
     });
   }
 
-  // ---------- Sending ----------
+  // ------------------ Helpers ------------------
+  void _snack(String m) =>
+      ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(m)));
 
-  Future<void> _send() async {
-    final text = _composer.text.trim();
-    if (text.isEmpty) return;
-    setState(() {}); // briefly disables the send button via rebuild
-    _composer.clear();
+  bool _isUrl(String s) {
+    final u = Uri.tryParse(s.trim());
+    return u != null && (u.scheme == 'http' || u.scheme == 'https');
+  }
 
+  Future<void> _openUrl(String url) async {
+    final uri = Uri.parse(url.trim());
+    if (!await launchUrl(uri, mode: LaunchMode.externalApplication)) {
+      _snack('Could not open link');
+    }
+  }
+
+  String _ext(String name) => p.extension(name).toLowerCase();
+  bool _looksImage(String name) =>
+      const ['.png', '.jpg', '.jpeg', '.gif', '.webp', '.bmp', '.heic']
+          .contains(_ext(name));
+  bool _looksVideo(String name) =>
+      const ['.mp4', '.mov', '.m4v', '.webm', '.avi', '.mkv']
+          .contains(_ext(name));
+
+  String _fileNameFromUrl(String url) {
+    final u = Uri.tryParse(url);
+    if (u == null) return 'file.bin';
+    var last = u.pathSegments.isNotEmpty ? u.pathSegments.last : 'file.bin';
+    if (last.isEmpty) last = 'file.bin';
+    return last;
+  }
+
+  // Google Maps URL -> LatLng
+  LatLng? _latLngFromMapsUrl(String url) {
+    final uri = Uri.tryParse(url.trim());
+    if (uri == null) return null;
+
+    final q = uri.queryParameters['query'] ?? uri.queryParameters['q'];
+    if (q != null) {
+      final parts = q.split(',');
+      if (parts.length >= 2) {
+        final lat = double.tryParse(parts[0]);
+        final lng = double.tryParse(parts[1]);
+        if (lat != null && lng != null) return LatLng(lat, lng);
+      }
+    }
+
+    // path like /@lat,lng,zoom
+    final joined = uri.pathSegments.join('/');
+    final atIdx = joined.indexOf('@');
+    if (atIdx != -1) {
+      final after = joined.substring(atIdx + 1);
+      final nums = after.split(',');
+      if (nums.length >= 2) {
+        final lat = double.tryParse(nums[0]);
+        final lng = double.tryParse(nums[1]);
+        if (lat != null && lng != null) return LatLng(lat, lng);
+      }
+    }
+    return null;
+  }
+
+  // ------------------ SENDING overlays ------------------
+
+  /// Simple non-blocking overlay with spinner + static label.
+  /// Returns a closer to remove the overlay.
+  VoidCallback _showBusyOverlay({required String label, bool top = false}) {
+    final overlay = Overlay.of(context);
+    late OverlayEntry entry;
+
+    entry = OverlayEntry(
+      builder: (_) => IgnorePointer(
+        ignoring: true,
+        child: Stack(children: [
+          Positioned(
+            left: 16,
+            right: 16,
+            bottom: top ? null : (80 + MediaQuery.of(context).viewInsets.bottom),
+            top: top ? (kToolbarHeight + 60) : null,
+            child: Material(
+              elevation: 8,
+              borderRadius: BorderRadius.circular(14),
+              color: Theme.of(context).colorScheme.surface,
+              child: Padding(
+                padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
+                child: Row(
+                  children: [
+                    const SizedBox(
+                      width: 20,
+                      height: 20,
+                      child: CircularProgressIndicator(strokeWidth: 2),
+                    ),
+                    const SizedBox(width: 12),
+                    Text(label, style: Theme.of(context).textTheme.titleMedium),
+                  ],
+                ),
+              ),
+            ),
+          ),
+        ]),
+      ),
+    );
+
+    overlay.insert(entry);
+    return () => entry.remove();
+  }
+
+  /// Variant with updatable label (kept for other use cases).
+  VoidCallback _showBusyOverlayVN(ValueNotifier<String> labelVN, {bool top = false}) {
+    final overlay = Overlay.of(context);
+    late OverlayEntry entry;
+
+    void listener() => entry.markNeedsBuild();
+    labelVN.addListener(listener);
+
+    entry = OverlayEntry(
+      builder: (_) => IgnorePointer(
+        ignoring: true,
+        child: Stack(children: [
+          Positioned(
+            left: 16,
+            right: 16,
+            bottom: top ? null : (80 + MediaQuery.of(context).viewInsets.bottom),
+            top: top ? (kToolbarHeight + 24) : null,
+            child: Material(
+              elevation: 8,
+              borderRadius: BorderRadius.circular(14),
+              color: Theme.of(context).colorScheme.surface,
+              child: Padding(
+                padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
+                child: Row(
+                  children: [
+                    const SizedBox(
+                      width: 20,
+                      height: 20,
+                      child: CircularProgressIndicator(strokeWidth: 2),
+                    ),
+                    const SizedBox(width: 12),
+                    ValueListenableBuilder<String>(
+                      valueListenable: labelVN,
+                      builder: (_, text, __) =>
+                          Text(text, style: Theme.of(context).textTheme.titleMedium),
+                    ),
+                  ],
+                ),
+              ),
+            ),
+          ),
+        ]),
+      ),
+    );
+
+    overlay.insert(entry);
+    return () {
+      labelVN.removeListener(listener);
+      entry.remove();
+    };
+  }
+
+  // ------------------ Send handlers ------------------
+  Future<void> _sendText(String text) async {
     final me = _myId;
     if (me == null) {
       _snack('Not signed in');
       return;
     }
-
+    final close = _showBusyOverlay(label: 'Sending…');
     try {
       await _sb.from('messages').insert({
         'thread_id': _tid,
         'sender_id': me,
         'kind': 'text',
-        'body': text,
+        'body': text.trim(),
       });
-      // Realtime insert will append and scroll
     } catch (e) {
       _snack('Send failed: $e');
+    } finally {
+      close();
+      _scrollToBottomSoon();
     }
   }
 
-  // ---------- Delete actions ----------
+  // ------------------ ONLY CHANGE HERE ------------------
+  Future<void> _sendFiles(List<File> files) async {
+    final me = _myId;
+    if (me == null) {
+      _snack('Not signed in');
+      return;
+    }
+    if (files.isEmpty) return;
 
+    // Fixed "Uploading…" overlay just under the AppBar (no 1/N)
+    final close = _showBusyOverlay(label: 'Uploading…', top: true);
+
+    try {
+      for (int i = 0; i < files.length; i++) {
+        final f = files[i];
+
+        final bytes = await f.readAsBytes();
+        final name = p.basename(f.path);
+        final path = '$_tid/${DateTime.now().millisecondsSinceEpoch}_$name';
+
+        await _sb.storage.from(_storageBucket).uploadBinary(path, bytes);
+        final url = _sb.storage.from(_storageBucket).getPublicUrl(path);
+
+        await _sb.from('messages').insert({
+          'thread_id': _tid,
+          'sender_id': me,
+          'kind': 'text', // file messages are URL-only here
+          'body': url,
+        });
+      }
+      _snack('Sent ${files.length} file${files.length == 1 ? '' : 's'}');
+    } on StorageException catch (e) {
+      _snack(e.message.contains('Bucket not found')
+          ? 'Create a Storage bucket named "$_storageBucket" (or change the name).'
+          : 'Storage error: ${e.message}');
+    } catch (e) {
+      _snack('File send failed: $e');
+    } finally {
+      close();
+      _scrollToBottomSoon();
+    }
+  }
+
+  Future<void> _sendLocation({
+    required double lat,
+    required double lng,
+    double? accuracyM,
+  }) async {
+    final me = _myId;
+    if (me == null) {
+      _snack('Not signed in');
+      return;
+    }
+    final close = _showBusyOverlay(label: 'Sending location…');
+    final url = 'https://www.google.com/maps/search/?api=1&query=$lat,$lng';
+    try {
+      await _sb.from('messages').insert({
+        'thread_id': _tid,
+        'sender_id': me,
+        'kind': 'location', // ensures map card shows
+        'body': url,
+        'location_lat': lat,
+        'location_lng': lng,
+        'location_accuracy_m': accuracyM,
+      });
+    } catch (e) {
+      _snack('Location send failed: $e');
+    } finally {
+      close();
+      _scrollToBottomSoon();
+    }
+  }
+
+  // ------------------ Delete ------------------
   Future<void> _deleteForMe(String messageId) async {
     try {
       await _sb.from('message_hides').insert({'message_id': messageId});
-      _hidden.add(messageId); // hide locally immediately
-      if (mounted) setState(() {});
     } on PostgrestException catch (e) {
       _snack(e.message);
     } catch (e) {
       _snack('Delete failed: $e');
     }
+    _hidden.add(messageId);
+    if (mounted) setState(() {});
   }
 
   Future<void> _deleteForEveryone(Map<String, dynamic> m) async {
@@ -307,27 +510,23 @@ class _ThreadScreenState extends State<ThreadScreen> {
       return;
     }
     final id = m['id'] as String;
-
     try {
-      // All time limits / ownership checks are enforced in SQL.
       await _sb.rpc('unsend_message', params: {'p_id': id});
-
-      // Optimistic local change; backend will also push a realtime UPDATE.
-      final nowIso = DateTime.now().toUtc().toIso8601String();
-      m['deleted_at'] = nowIso;
+      m['deleted_at'] = DateTime.now().toUtc().toIso8601String();
       m['deleted_by'] = me;
       m['body'] = null;
       if (mounted) setState(() {});
     } on PostgrestException catch (e) {
-      _snack(e.message); // e.g., "You can only unsend within 2 minutes"
+      _snack(e.message);
     } catch (e) {
       _snack('Delete failed: $e');
     }
   }
 
   void _showMessageActions(Map<String, dynamic> m) {
-    final me = _myId;
-    final isMine = m['sender_id'] == me;
+    final body = (m['body'] as String?) ?? '';
+    final isLink = _isUrl(body);
+    final isMine = m['sender_id'] == _myId;
     final alreadyDeleted = m['deleted_at'] != null || (m['kind'] == 'deleted');
 
     showModalBottomSheet(
@@ -337,6 +536,15 @@ class _ThreadScreenState extends State<ThreadScreen> {
         child: Column(
           mainAxisSize: MainAxisSize.min,
           children: [
+            if (isLink)
+              ListTile(
+                leading: const Icon(Icons.link),
+                title: const Text('Open link'),
+                onTap: () {
+                  Navigator.pop(context);
+                  _openUrl(body);
+                },
+              ),
             ListTile(
               leading: const Icon(Icons.visibility_off),
               title: const Text('Delete for me'),
@@ -361,161 +569,129 @@ class _ThreadScreenState extends State<ThreadScreen> {
     );
   }
 
-  // Clear entire chat for me (sets/reset cutoff and removes older local msgs)
-  Future<void> _clearChatForMe() async {
-    final ok = await showDialog<bool>(
-      context: context,
-      builder: (_) => AlertDialog(
-        title: const Text('Clear chat?'),
-        content: const Text(
-            'This removes the conversation history for you. Others keep their messages.'),
-        actions: [
-          TextButton(onPressed: () => Navigator.pop(context, false), child: const Text('Cancel')),
-          FilledButton(onPressed: () => Navigator.pop(context, true), child: const Text('Clear')),
-        ],
-      ),
-    );
-    if (ok != true) return;
+  // ------------------ Inline download (per message) ------------------
+  bool _isDownloading(String mid) => _dlCancels.containsKey(mid);
+
+  Future<void> _startDownload({
+    required String messageId,
+    required String url,
+    required String suggestedName,
+  }) async {
+    if (_isDownloading(messageId)) return;
+
+    final cancelToken = CancelToken();
+    _dlCancels[messageId] = cancelToken;
+    _dlProgress[messageId] = 0.0;
+    if (mounted) setState(() {});
 
     try {
-      await _sb.rpc('hide_thread', params: {'p_thread_id': _tid});
-      // Update local cutoff and drop older messages
-      _cutoff = DateTime.now().toUtc();
-      _messages.removeWhere((m) {
-        final ts = DateTime.tryParse(m['created_at'] ?? '')?.toUtc();
-        return ts == null || !ts.isAfter(_cutoff!);
-      });
-      _hidden.clear(); // old hides no longer relevant
-      if (mounted) setState(() {});
-      _snack('Chat cleared');
-    } on PostgrestException catch (e) {
-      _snack(e.message);
-    } catch (e) {
-      _snack('Clear failed: $e');
-    }
-  }
+      // Ensure filename has extension
+      String name = suggestedName.trim();
+      if (!name.contains('.')) {
+        final fromUrl = _fileNameFromUrl(url);
+        name = fromUrl.contains('.') ? fromUrl : '$fromUrl.bin';
+      }
 
-  // ---------- Calling (ringing) from a 1v1 thread ----------
+      final res = await Dio().get<List<int>>(
+        url,
+        options: Options(responseType: ResponseType.bytes, followRedirects: true),
+        cancelToken: cancelToken,
+        onReceiveProgress: (received, total) {
+          if (!mounted) return;
+          if (!_dlProgress.containsKey(messageId)) return;
+          if (total > 0) {
+            _dlProgress[messageId] = received / total;
+            setState(() {});
+          }
+        },
+      );
 
-  Future<void> _startCall({required bool video}) async {
-    final me = _myId;
-    if (me == null) {
-      _snack('Not signed in');
-      return;
-    }
-
-    if (widget.args.isGroup) {
-      _snack('Group calls are not available yet');
-      return;
-    }
-
-    try {
-      // find the other participant in this 1v1
-      final memRows = await _sb
-          .from('thread_members')
-          .select('user_id')
-          .eq('thread_id', _tid);
-
-      final others = (memRows as List)
-          .map((m) => (m as Map)['user_id'] as String)
-          .where((id) => id != me)
-          .toList();
-
-      if (others.length != 1) {
-        _snack('Could not identify the other participant');
+      if (cancelToken.isCancelled) {
+        _snack('Download canceled');
         return;
       }
-      final calleeId = others.first;
 
-      // insert invite with the requested kind
-      final inserted = await _sb
-          .from('call_invites')
-          .insert({
-        'thread_id': _tid,
-        'caller_id': me,
-        'callee_id': calleeId,
-        'kind': video ? 'video' : 'audio',
-      })
-          .select('id')
-          .single();
+      final bytes = Uint8List.fromList(res.data ?? const <int>[]);
+      if (bytes.isEmpty) throw Exception('Empty file received.');
 
-      final inviteId = inserted['id'] as String;
+      _dlProgress[messageId] = 1.0;
+      if (mounted) setState(() {});
 
-      if (!mounted) return;
-      Navigator.pushNamed(
-        context,
-        AppRoutes.outgoingCall,
-        arguments: OutgoingCallArgs(
-          inviteId: inviteId,
-          threadId: _tid,
-          calleeName: _title,
-          video: video,
+      // Save via SAF
+      final tmpDir = await getTemporaryDirectory();
+      final tmpFile = File(p.join(tmpDir.path, name));
+      await tmpFile.writeAsBytes(bytes, flush: true);
+
+      _snack('Saving…');
+
+      final savedTo = await FlutterFileDialog.saveFile(
+        params: SaveFileDialogParams(
+          sourceFilePath: tmpFile.path,
+          fileName: name,
         ),
       );
-    } on PostgrestException catch (e) {
-      _snack(e.message);
+
+      if (savedTo == null || savedTo.isEmpty) {
+        throw Exception('Save canceled or failed.');
+      }
+
+      _snack('Saved to: $savedTo');
     } catch (e) {
-      _snack('Could not start call: $e');
+      if (!(e is DioException && CancelToken.isCancel(e))) {
+        _snack('Download failed: $e');
+      }
+    } finally {
+      _dlCancels.remove(messageId);
+      _dlProgress.remove(messageId);
+      if (mounted) setState(() {});
     }
   }
 
-  void _openCallSheet() {
-    showModalBottomSheet(
-      context: context,
-      showDragHandle: true,
-      builder: (_) => SafeArea(
-        child: Column(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            ListTile(
-              leading: const Icon(Icons.call),
-              title: const Text('Audio call'),
-              onTap: () {
-                Navigator.pop(context);
-                _startCall(video: false);
-              },
-            ),
-            ListTile(
-              leading: const Icon(Icons.videocam),
-              title: const Text('Video call'),
-              onTap: () {
-                Navigator.pop(context);
-                _startCall(video: true);
-              },
-            ),
-          ],
-        ),
+  void _cancelDownload(String messageId) {
+    final token = _dlCancels[messageId];
+    if (token != null && !token.isCancelled) {
+      token.cancel('Canceled by user');
+    }
+  }
+
+  // Small helper to render icon-only *pill* buttons
+  Widget _iconPill({
+    required IconData icon,
+    required String tooltip,
+    required VoidCallback onPressed,
+  }) {
+    return IconButton.outlined(
+      tooltip: tooltip,
+      onPressed: onPressed,
+      icon: Icon(icon),
+      style: IconButton.styleFrom(
+        shape: const StadiumBorder(),
+        padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
+        visualDensity: VisualDensity.compact,
       ),
     );
   }
 
-  // ---------- UI ----------
-
-  void _snack(String m) =>
-      ScaffoldMessenger.of(context)
-          .showSnackBar(SnackBar(content: Text(m)));
-
+  // ------------------ UI ------------------
   @override
   Widget build(BuildContext context) {
-    // Filter with per-user hides (cutoff already applied at load time)
-    final visible =
-    _messages.where((m) => !_hidden.contains(m['id'])).toList();
+    final visible = _messages.where((m) => !_hidden.contains(m['id'])).toList();
 
     return Scaffold(
       appBar: AppBar(
         title: Text(_title),
-        actions: [
+        actions: <Widget>[
           IconButton(
             tooltip: 'Call',
-            icon: const Icon(Icons.call_outlined), // audio-first affordance
-            onPressed: _openCallSheet,             // choose Audio/Video
+            icon: const Icon(Icons.call_outlined),
+            onPressed: () => _openCallSheet(),
           ),
           PopupMenuButton<String>(
             onSelected: (v) {
               if (v == 'clear') _clearChatForMe();
             },
-            itemBuilder: (_) => const [
-              PopupMenuItem(
+            itemBuilder: (context) => const <PopupMenuEntry<String>>[
+              PopupMenuItem<String>(
                 value: 'clear',
                 child: Text('Clear chat for me'),
               ),
@@ -535,20 +711,272 @@ class _ThreadScreenState extends State<ThreadScreen> {
               itemBuilder: (context, i) {
                 final m = visible[i];
                 final isMe = m['sender_id'] == _myId;
+                final kind = (m['kind'] as String?) ?? 'text';
+                final body = (m['body'] as String?) ?? '';
                 final deleted =
-                    m['deleted_at'] != null || (m['kind'] == 'deleted');
-                final body =
-                deleted ? 'Message deleted' : (m['body'] as String?) ?? '';
+                    m['deleted_at'] != null || (kind == 'deleted');
 
-                final ts = DateTime.tryParse(m['created_at'] ?? '') ??
-                    DateTime.now();
+                // timestamp
+                final raw = m['created_at'];
+                DateTime ts = DateTime.now();
+                if (raw is String) {
+                  ts = DateTime.tryParse(raw) ?? ts;
+                } else if (raw is DateTime) {
+                  ts = raw;
+                }
+
+                // 1) Map preview (from columns or maps URL)
+                final latCol = (m['location_lat'] as num?)?.toDouble();
+                final lngCol = (m['location_lng'] as num?)?.toDouble();
+                LatLng? point;
+                if (!deleted) {
+                  if (kind == 'location' &&
+                      latCol != null &&
+                      lngCol != null) {
+                    point = LatLng(latCol, lngCol);
+                  } else if (_isUrl(body)) {
+                    point = _latLngFromMapsUrl(body);
+                  }
+                }
+                if (point != null) {
+                  final mapsUrl =
+                      'https://www.google.com/maps/search/?api=1&query=${point.latitude},${point.longitude}';
+                  return Align(
+                    alignment: isMe
+                        ? Alignment.centerRight
+                        : Alignment.centerLeft,
+                    child: ConstrainedBox(
+                      constraints: const BoxConstraints(maxWidth: 320),
+                      child: Card(
+                        margin: const EdgeInsets.symmetric(
+                            vertical: 6, horizontal: 6),
+                        clipBehavior: Clip.antiAlias,
+                        shape: RoundedRectangleBorder(
+                            borderRadius: BorderRadius.circular(14)),
+                        child: InkWell(
+                          onTap: () => _openUrl(mapsUrl),
+                          onLongPress: () => _showMessageActions(m),
+                          child: Column(
+                            crossAxisAlignment:
+                            CrossAxisAlignment.stretch,
+                            children: [
+                              SizedBox(
+                                height: 160,
+                                child: FlutterMap(
+                                  options: MapOptions(
+                                    initialCenter: point,
+                                    initialZoom: 15,
+                                    interactionOptions:
+                                    const InteractionOptions(
+                                      flags: InteractiveFlag.none,
+                                    ),
+                                  ),
+                                  children: [
+                                    // Use Carto tiles to avoid OSM "blocked" banners
+                                    TileLayer(
+                                      urlTemplate:
+                                      'https://{s}.basemaps.cartocdn.com/light_all/{z}/{x}/{y}{r}.png',
+                                      subdomains: const [
+                                        'a',
+                                        'b',
+                                        'c',
+                                        'd'
+                                      ],
+                                      userAgentPackageName:
+                                      'com.yourcompany.yourapp',
+                                    ),
+                                    MarkerLayer(markers: [
+                                      Marker(
+                                        point: point,
+                                        width: 40,
+                                        height: 40,
+                                        child: const Icon(
+                                          Icons.location_on,
+                                          size: 36,
+                                          color: Colors.red,
+                                        ),
+                                      ),
+                                    ]),
+                                  ],
+                                ),
+                              ),
+                              Container(
+                                color: Theme.of(context)
+                                    .colorScheme
+                                    .surface,
+                                padding: const EdgeInsets.symmetric(
+                                    horizontal: 12, vertical: 8),
+                                child: Row(
+                                  children: [
+                                    const Icon(Icons.map, size: 18),
+                                    const SizedBox(width: 8),
+                                    Expanded(
+                                      child: Text(
+                                        'Open in Google Maps',
+                                        overflow: TextOverflow.ellipsis,
+                                        style: TextStyle(
+                                          decoration:
+                                          TextDecoration.underline,
+                                          color: Theme.of(context)
+                                              .colorScheme
+                                              .primary,
+                                          fontWeight: FontWeight.w600,
+                                        ),
+                                      ),
+                                    ),
+                                    Text(
+                                      timeOfDay(ts),
+                                      style: TextStyle(
+                                          fontSize: 11,
+                                          color: Colors.grey.shade600),
+                                    ),
+                                  ],
+                                ),
+                              ),
+                            ],
+                          ),
+                        ),
+                      ),
+                    ),
+                  );
+                }
+
+                // 2) File/media message card (URL with extension)
+                final isLink = !deleted && _isUrl(body);
+                final looksFile = isLink &&
+                    _ext(_fileNameFromUrl(body)).isNotEmpty;
+
+                if (!deleted && looksFile) {
+                  final name = _fileNameFromUrl(body);
+                  final isImg = _looksImage(name);
+                  final isVid = _looksVideo(name);
+                  final mid = m['id'] as String;
+                  final downloading = _isDownloading(mid);
+                  final prog = _dlProgress[mid] ?? 0.0;
+                  final pct = (prog * 100)
+                      .clamp(0, 100)
+                      .toStringAsFixed(0);
+
+                  return Align(
+                    alignment: isMe
+                        ? Alignment.centerRight
+                        : Alignment.centerLeft,
+                    child: ConstrainedBox(
+                      constraints: const BoxConstraints(maxWidth: 320),
+                      child: Card(
+                        margin: const EdgeInsets.symmetric(
+                            vertical: 6, horizontal: 6),
+                        child: InkWell(
+                          onLongPress: () => _showMessageActions(m),
+                          onTap: () => _openUrl(body),
+                          borderRadius: BorderRadius.circular(12),
+                          child: Padding(
+                            padding: const EdgeInsets.all(12),
+                            child: Column(
+                              crossAxisAlignment:
+                              CrossAxisAlignment.start,
+                              children: [
+                                Row(
+                                  crossAxisAlignment:
+                                  CrossAxisAlignment.start,
+                                  children: [
+                                    Icon(
+                                      isImg
+                                          ? Icons.image_outlined
+                                          : isVid
+                                          ? Icons.videocam_outlined
+                                          : Icons
+                                          .insert_drive_file_outlined,
+                                      size: 24,
+                                    ),
+                                    const SizedBox(width: 10),
+                                    Expanded(
+                                      child: Text(
+                                        name,
+                                        maxLines: 2,
+                                        overflow: TextOverflow.ellipsis,
+                                        style: const TextStyle(
+                                            fontWeight: FontWeight.w600),
+                                      ),
+                                    ),
+                                  ],
+                                ),
+                                const SizedBox(height: 10),
+
+                                // Inline progress OR actions
+                                if (downloading) ...[
+                                  LinearProgressIndicator(
+                                      value: prog == 0 ? null : prog),
+                                  const SizedBox(height: 8),
+                                  Row(
+                                    children: [
+                                      Text('$pct%',
+                                          style: Theme.of(context)
+                                              .textTheme
+                                              .labelMedium),
+                                      const Spacer(),
+                                      TextButton.icon(
+                                        icon: const Icon(Icons.close),
+                                        label: const Text('Cancel'),
+                                        onPressed: () =>
+                                            _cancelDownload(mid),
+                                      ),
+                                    ],
+                                  ),
+                                ] else ...[
+                                  Row(
+                                    children: [
+                                      _iconPill(
+                                        icon: Icons.download_rounded,
+                                        tooltip: 'Download',
+                                        onPressed: () => _startDownload(
+                                          messageId: mid,
+                                          url: body,
+                                          suggestedName: name,
+                                        ),
+                                      ),
+                                      const SizedBox(width: 6),
+                                      _iconPill(
+                                        icon: Icons.share_outlined,
+                                        tooltip: 'Share',
+                                        onPressed: () => Share.share(
+                                            body,
+                                            subject: name),
+                                      ),
+                                      const Spacer(),
+                                      Text(
+                                        timeOfDay(ts),
+                                        style: TextStyle(
+                                            fontSize: 11,
+                                            color:
+                                            Colors.grey.shade600),
+                                      ),
+                                    ],
+                                  ),
+                                ],
+                              ],
+                            ),
+                          ),
+                        ),
+                      ),
+                    ),
+                  );
+                }
+
+                // 3) Regular text bubble (includes link-only messages)
+                final Color? textColor = deleted
+                    ? Colors.grey.shade600
+                    : (isLink
+                    ? Theme.of(context).colorScheme.primary
+                    : null);
 
                 return Align(
                   alignment: isMe
                       ? Alignment.centerRight
                       : Alignment.centerLeft,
                   child: ConstrainedBox(
-                    constraints: const BoxConstraints(maxWidth: 320),
+                    constraints:
+                    const BoxConstraints(maxWidth: 320),
                     child: Card(
                       color: isMe
                           ? Theme.of(context)
@@ -559,31 +987,33 @@ class _ThreadScreenState extends State<ThreadScreen> {
                           vertical: 4, horizontal: 6),
                       child: InkWell(
                         onLongPress: () => _showMessageActions(m),
+                        onTap: isLink ? () => _openUrl(body) : null,
                         borderRadius: BorderRadius.circular(12),
                         child: Padding(
                           padding: const EdgeInsets.all(12),
                           child: Column(
-                            crossAxisAlignment: CrossAxisAlignment.start,
+                            crossAxisAlignment:
+                            CrossAxisAlignment.start,
                             children: [
                               Text(
-                                body,
+                                deleted ? 'Message deleted' : body,
                                 style: TextStyle(
                                   fontSize: 15,
                                   fontStyle: deleted
                                       ? FontStyle.italic
                                       : FontStyle.normal,
-                                  color: deleted
-                                      ? Colors.grey.shade600
-                                      : null,
+                                  color: textColor,
+                                  decoration: isLink
+                                      ? TextDecoration.underline
+                                      : TextDecoration.none,
                                 ),
                               ),
                               const SizedBox(height: 6),
                               Text(
                                 timeOfDay(ts),
                                 style: TextStyle(
-                                  fontSize: 11,
-                                  color: Colors.grey.shade600,
-                                ),
+                                    fontSize: 11,
+                                    color: Colors.grey.shade600),
                               ),
                             ],
                           ),
@@ -596,35 +1026,140 @@ class _ThreadScreenState extends State<ThreadScreen> {
             ),
           ),
           const Divider(height: 1),
-          SafeArea(
-            top: false,
-            child: Padding(
-              padding: const EdgeInsets.fromLTRB(12, 8, 12, 12),
-              child: Row(
-                children: [
-                  Expanded(
-                    child: TextField(
-                      controller: _composer,
-                      minLines: 1,
-                      maxLines: 5,
-                      decoration: const InputDecoration(
-                        hintText: 'Type your message…',
-                      ),
-                      onSubmitted: (_) => _send(),
-                    ),
-                  ),
-                  const SizedBox(width: 8),
-                  IconButton.filled(
-                    onPressed: _send,
-                    icon: const Icon(Icons.send),
-                  ),
-                ],
-              ),
-            ),
+          ChatInputBar(
+            onSendText: _sendText,
+            onSendFiles: _sendFiles,
+            onSendLocation: ({
+              required double lat,
+              required double lng,
+              double? accuracyM,
+            }) {
+              return _sendLocation(
+                  lat: lat, lng: lng, accuracyM: accuracyM);
+            },
           ),
         ],
       ),
     );
+  }
+
+  // ------------------ Misc ------------------
+  Future<void> _clearChatForMe() async {
+    final ok = await showDialog<bool>(
+      context: context,
+      builder: (_) => AlertDialog(
+        title: const Text('Clear chat?'),
+        content: const Text(
+            'This removes the conversation history for you. Others keep their messages.'),
+        actions: [
+          TextButton(
+              onPressed: () => Navigator.pop(context, false),
+              child: const Text('Cancel')),
+          FilledButton(
+              onPressed: () => Navigator.pop(context, true),
+              child: const Text('Clear')),
+        ],
+      ),
+    );
+    if (ok != true) return;
+
+    try {
+      await _sb.rpc('hide_thread', params: {'p_thread_id': _tid});
+      _cutoff = DateTime.now().toUtc();
+      _messages.removeWhere((m) {
+        final raw = m['created_at'];
+        DateTime? ts;
+        if (raw is String) ts = DateTime.tryParse(raw)?.toUtc();
+        if (raw is DateTime) ts = raw.toUtc();
+        return ts == null || !ts.isAfter(_cutoff!);
+      });
+      _hidden.clear();
+      if (mounted) setState(() {});
+      _snack('Chat cleared');
+    } on PostgrestException catch (e) {
+      _snack(e.message);
+    } catch (e) {
+      _snack('Clear failed: $e');
+    }
+  }
+
+  void _openCallSheet() {
+    showModalBottomSheet(
+      context: context,
+      showDragHandle: true,
+      builder: (_) => SafeArea(
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            ListTile(
+                leading: const Icon(Icons.call),
+                title: const Text('Audio call'),
+                onTap: () {
+                  Navigator.pop(context);
+                  _startCall(video: false);
+                }),
+            ListTile(
+                leading: const Icon(Icons.videocam),
+                title: const Text('Video call'),
+                onTap: () {
+                  Navigator.pop(context);
+                  _startCall(video: true);
+                }),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Future<void> _startCall({required bool video}) async {
+    final me = _myId;
+    if (me == null) {
+      _snack('Not signed in');
+      return;
+    }
+    if (widget.args.isGroup) {
+      _snack('Group calls are not available yet');
+      return;
+    }
+    try {
+      final memRows = await _sb
+          .from('thread_members')
+          .select('user_id')
+          .eq('thread_id', _tid);
+      final others = (memRows as List)
+          .map((m) => (m as Map)['user_id'] as String)
+          .where((id) => id != me)
+          .toList();
+      if (others.length != 1) {
+        _snack('Could not identify the other participant');
+        return;
+      }
+      final inserted = await _sb
+          .from('call_invites')
+          .insert({
+        'thread_id': _tid,
+        'caller_id': me,
+        'callee_id': others.first,
+        'kind': video ? 'video' : 'audio',
+      })
+          .select('id')
+          .single();
+      if (!mounted) return;
+      Navigator.pushNamed(
+        context,
+        AppRoutes.outgoingCall,
+        arguments: OutgoingCallArgs(
+          inviteId: inserted['id'] as String,
+          threadId: _tid,
+          calleeName: _title,
+          video: video,
+        ),
+      );
+    } on PostgrestException catch (e) {
+      _snack(e.message);
+    } catch (e) {
+      _snack('Could not start call: $e');
+    }
   }
 
   String timeOfDay(DateTime t) {
