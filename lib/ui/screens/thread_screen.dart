@@ -19,6 +19,10 @@ import '../../core/app_routes.dart';
 import 'outgoing_call_screen.dart' show OutgoingCallArgs;
 import '../widgets/chat_input_bar.dart';
 
+// In-app viewers
+import 'video_player_screen.dart';
+import 'image_viewer_screen.dart';
+
 class ThreadArgs {
   final String threadId;
   final String title;
@@ -251,6 +255,24 @@ class _ThreadScreenState extends State<ThreadScreen> {
     }
   }
 
+  void _openVideo(String url, {String? title}) {
+    Navigator.push(
+      context,
+      MaterialPageRoute(
+        builder: (_) => VideoPlayerScreen(url: url, title: title),
+      ),
+    );
+  }
+
+  void _openImage(String url, {String? title}) {
+    Navigator.push(
+      context,
+      MaterialPageRoute(
+        builder: (_) => ImageViewerScreen(url: url, title: title, heroTag: url),
+      ),
+    );
+  }
+
   String _ext(String name) => p.extension(name).toLowerCase();
   bool _looksImage(String name) =>
       const ['.png', '.jpg', '.jpeg', '.gif', '.webp', '.bmp', '.heic']
@@ -299,7 +321,7 @@ class _ThreadScreenState extends State<ThreadScreen> {
 
   // ------------------ SENDING overlays ------------------
 
-  /// Simple non-blocking overlay with spinner + static label.
+  /// Non-blocking overlay with spinner + static label ("Uploading…")
   /// Returns a closer to remove the overlay.
   VoidCallback _showBusyOverlay({required String label, bool top = false}) {
     final overlay = Overlay.of(context);
@@ -313,7 +335,7 @@ class _ThreadScreenState extends State<ThreadScreen> {
             left: 16,
             right: 16,
             bottom: top ? null : (80 + MediaQuery.of(context).viewInsets.bottom),
-            // a little closer to the AppBar than default
+            // a little closer to the AppBar
             top: top ? (kToolbarHeight + 8) : null,
             child: Material(
               elevation: 8,
@@ -343,7 +365,7 @@ class _ThreadScreenState extends State<ThreadScreen> {
     return () => entry.remove();
   }
 
-  /// Variant with updatable label (kept for other use cases).
+  /// Updatable-label variant (kept for other cases).
   VoidCallback _showBusyOverlayVN(ValueNotifier<String> labelVN, {bool top = false}) {
     final overlay = Overlay.of(context);
     late OverlayEntry entry;
@@ -722,7 +744,7 @@ class _ThreadScreenState extends State<ThreadScreen> {
                 if (raw is String) ts = DateTime.tryParse(raw) ?? ts;
                 else if (raw is DateTime) ts = raw;
 
-                // 1) Map preview
+                // 1) Map preview (from columns or maps URL)
                 final latCol = (m['location_lat'] as num?)?.toDouble();
                 final lngCol = (m['location_lng'] as num?)?.toDouble();
                 LatLng? point;
@@ -761,6 +783,7 @@ class _ThreadScreenState extends State<ThreadScreen> {
                                     ),
                                   ),
                                   children: [
+                                    // Use Carto tiles to avoid OSM "blocked" banners
                                     TileLayer(
                                       urlTemplate:
                                       'https://{s}.basemaps.cartocdn.com/light_all/{z}/{x}/{y}{r}.png',
@@ -828,6 +851,63 @@ class _ThreadScreenState extends State<ThreadScreen> {
                   final prog = _dlProgress[mid] ?? 0.0;
                   final pct = (prog * 100).clamp(0, 100).toStringAsFixed(0);
 
+                  // Header: image preview, simple video box, or generic file row
+                  Widget header;
+                  if (isImg) {
+                    header = Hero(
+                      tag: body,
+                      child: Image.network(
+                        body,
+                        height: 180,
+                        width: double.infinity,
+                        fit: BoxFit.cover,
+                        errorBuilder: (_, __, ___) => Container(
+                          height: 180,
+                          color: Colors.grey.shade300,
+                          child: const Center(child: Icon(Icons.broken_image)),
+                        ),
+                      ),
+                    );
+                  } else if (isVid) {
+                    // Simple 16:9 box with a play icon
+                    header = SizedBox(
+                      height: 180,
+                      width: double.infinity,
+                      child: Stack(
+                        fit: StackFit.expand,
+                        children: [
+                          Container(color: Colors.black12),
+                          const Center(
+                            child: CircleAvatar(
+                              radius: 28,
+                              backgroundColor: Colors.black45,
+                              child: Icon(Icons.play_arrow, color: Colors.white, size: 34),
+                            ),
+                          ),
+                        ],
+                      ),
+                    );
+                  } else {
+                    header = Padding(
+                      padding: const EdgeInsets.all(12),
+                      child: Row(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          const Icon(Icons.insert_drive_file_outlined, size: 24),
+                          const SizedBox(width: 10),
+                          Expanded(
+                            child: Text(
+                              name,
+                              maxLines: 2,
+                              overflow: TextOverflow.ellipsis,
+                              style: const TextStyle(fontWeight: FontWeight.w600),
+                            ),
+                          ),
+                        ],
+                      ),
+                    );
+                  }
+
                   return Align(
                     alignment: isMe ? Alignment.centerRight : Alignment.centerLeft,
                     child: ConstrainedBox(
@@ -837,50 +917,15 @@ class _ThreadScreenState extends State<ThreadScreen> {
                         clipBehavior: Clip.antiAlias,
                         child: InkWell(
                           onLongPress: () => _showMessageActions(m),
-                          onTap: () => _openUrl(body),
+                          // Open videos/images inside the app
+                          onTap: () => isVid
+                              ? _openVideo(body, title: name)
+                              : (isImg ? _openImage(body, title: name) : _openUrl(body)),
                           borderRadius: BorderRadius.circular(12),
                           child: Column(
                             crossAxisAlignment: CrossAxisAlignment.start,
                             children: [
-                              if (isImg)
-                              // --- Image preview ---
-                                Image.network(
-                                  body,
-                                  height: 180,
-                                  width: double.infinity,
-                                  fit: BoxFit.cover,
-                                  errorBuilder: (_, __, ___) => Container(
-                                    height: 180,
-                                    color: Colors.grey.shade300,
-                                    child: const Center(child: Icon(Icons.broken_image)),
-                                  ),
-                                )
-                              else
-                              // Fallback: icon + filename header
-                                Padding(
-                                  padding: const EdgeInsets.all(12),
-                                  child: Row(
-                                    crossAxisAlignment: CrossAxisAlignment.start,
-                                    children: [
-                                      Icon(
-                                        isVid
-                                            ? Icons.videocam_outlined
-                                            : Icons.insert_drive_file_outlined,
-                                        size: 24,
-                                      ),
-                                      const SizedBox(width: 10),
-                                      Expanded(
-                                        child: Text(
-                                          name,
-                                          maxLines: 2,
-                                          overflow: TextOverflow.ellipsis,
-                                          style: const TextStyle(fontWeight: FontWeight.w600),
-                                        ),
-                                      ),
-                                    ],
-                                  ),
-                                ),
-
+                              header,
                               const SizedBox(height: 8),
 
                               // Inline progress OR actions
@@ -920,14 +965,12 @@ class _ThreadScreenState extends State<ThreadScreen> {
                                     _iconPill(
                                       icon: Icons.share_outlined,
                                       tooltip: 'Share',
-                                      onPressed: () =>
-                                          Share.share(body, subject: name),
+                                      onPressed: () => Share.share(body, subject: name),
                                     ),
                                     const Spacer(),
                                     Text(
                                       timeOfDay(ts),
-                                      style: TextStyle(
-                                          fontSize: 11, color: Colors.grey.shade600),
+                                      style: TextStyle(fontSize: 11, color: Colors.grey.shade600),
                                     ),
                                   ],
                                 ),
@@ -967,9 +1010,7 @@ class _ThreadScreenState extends State<ThreadScreen> {
                                   fontSize: 15,
                                   fontStyle: deleted ? FontStyle.italic : FontStyle.normal,
                                   color: textColor,
-                                  decoration: isLink
-                                      ? TextDecoration.underline
-                                      : TextDecoration.none,
+                                  decoration: isLink ? TextDecoration.underline : TextDecoration.none,
                                 ),
                               ),
                               const SizedBox(height: 6),
