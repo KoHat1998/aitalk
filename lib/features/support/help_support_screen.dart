@@ -1,6 +1,9 @@
 import 'package:flutter/material.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
 
+/// Make sure this matches your folder/slug: supabase/functions/email-admin
+const kSupportEmailFunctionSlug = 'email-admin';
+
 class FAQItem {
   final String q;
   final String a;
@@ -55,7 +58,6 @@ class _HelpSupportScreenState extends State<HelpSupportScreen> {
   }
 
   // ---------- Data ----------
-
   String? _validateComment(String? v) {
     final s = (v ?? '').trim();
     if (s.length < 10) return 'Please write at least 10 characters';
@@ -85,7 +87,9 @@ class _HelpSupportScreenState extends State<HelpSupportScreen> {
     final sb = Supabase.instance.client;
     _ticketChannel?.unsubscribe();
 
-    _ticketChannel = sb.channel('ticket_$id').onPostgresChanges(
+    _ticketChannel = sb
+        .channel('ticket_$id')
+        .onPostgresChanges(
       event: PostgresChangeEvent.update,
       schema: 'public',
       table: 'support_tickets',
@@ -101,9 +105,9 @@ class _HelpSupportScreenState extends State<HelpSupportScreen> {
           };
         });
       },
-    ).subscribe();
+    )
+        .subscribe();
   }
-
 
   Future<void> _send() async {
     if (!_formKey.currentState!.validate()) return;
@@ -117,7 +121,7 @@ class _HelpSupportScreenState extends State<HelpSupportScreen> {
 
     setState(() => _sending = true);
     try {
-      // Create ticket (status defaults to 'submitted')
+      // 1) Create ticket (status defaults to 'submitted')
       final row = await Supabase.instance.client
           .from('support_tickets')
           .insert({
@@ -133,15 +137,24 @@ class _HelpSupportScreenState extends State<HelpSupportScreen> {
       setState(() => _latestTicket = row);
       _subscribeToTicket(row['id'] as int);
 
-      // Optional: notify admin (Edge Function)
-      Supabase.instance.client.functions.invoke(
-        'admin-email',
-        body: {
-          'ticketId': row['id'].toString(),
-          'email': widget.userEmail,
-          'message': _commentCtrl.text.trim(),
-        },
-      ).catchError((_) {});
+      // 2) Notify admin via Edge Function (await so you see errors)
+      try {
+        final resp = await Supabase.instance.client.functions.invoke(
+          kSupportEmailFunctionSlug, // <— 'email-admin'
+          body: {
+            'ticketId': row['id'].toString(),
+            'email': widget.userEmail,
+            'message': _commentCtrl.text.trim(),
+          },
+        );
+        if (resp.status >= 400) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            SnackBar(content: Text('Admin email failed (${resp.status}).')),
+          );
+        }
+      } catch (_) {
+        // best-effort: ticket is still created; email may fail silently
+      }
 
       ScaffoldMessenger.of(context).showSnackBar(
         SnackBar(content: Text('Report sent! Ticket #${row['id']}')),
@@ -163,7 +176,6 @@ class _HelpSupportScreenState extends State<HelpSupportScreen> {
   }
 
   // ---------- Theme & helpers ----------
-
   ThemeData _theme(BuildContext context) {
     return ThemeData(
       brightness: Brightness.dark,
@@ -201,7 +213,6 @@ class _HelpSupportScreenState extends State<HelpSupportScreen> {
         ),
         contentPadding: const EdgeInsets.symmetric(horizontal: 14, vertical: 14),
       ),
-      // ✅ FIX 2: CardThemeData (not CardTheme)
       cardTheme: const CardThemeData(
         color: _card,
         surfaceTintColor: Colors.transparent,
@@ -237,22 +248,14 @@ class _HelpSupportScreenState extends State<HelpSupportScreen> {
   }
 
   Color _dotColor(int i, int cur) {
-    // When completed, make ALL dots green
-    final completed = (_latestTicket?['status'] as String?)
-        ?.toLowerCase() == 'completed';
-    if (completed) return _ok;
-
-    // Otherwise: passed = green, current = blue, upcoming = muted
+    final completed = (_latestTicket?['status'] as String?)?.toLowerCase() == 'completed';
+    if (completed) return _ok; // all green
     return i < cur ? _ok : (i == cur ? _accent : _muted);
   }
 
   Color _lineColor(int i, int cur) {
-    // When completed, make ALL segments green
-    final completed = (_latestTicket?['status'] as String?)
-        ?.toLowerCase() == 'completed';
-    if (completed) return _ok;
-
-    // Otherwise: segments before current are green
+    final completed = (_latestTicket?['status'] as String?)?.toLowerCase() == 'completed';
+    if (completed) return _ok; // all green
     return i < cur ? _ok : _stroke;
   }
 
