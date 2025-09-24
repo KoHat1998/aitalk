@@ -90,8 +90,8 @@ class _NewGroupScreenState extends State<NewGroupScreen> {
       return;
     }
     if (_selected.isEmpty) {
-      ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(content: Text('Select at least 1 member')));
+      ScaffoldMessenger.of(context)
+          .showSnackBar(const SnackBar(content: Text('Select at least 1 member')));
       return;
     }
 
@@ -104,57 +104,31 @@ class _NewGroupScreenState extends State<NewGroupScreen> {
 
     setState(() => _creating = true);
     try {
-      // Always include self; de-dupe.
-      final members = <String>{..._selected, me}.toList();
+      // Let the RPC handle membership (it will include the creator and seed the initial system message).
+      final members = _selected.toList();
 
-      String? tid;
+      final res = await _sb.rpc('create_group', params: {
+        'p_name': name,
+        'p_member_ids': members,
+      });
 
-      // --- Try RPC first (if you created it) ---
-      try {
-        final res = await _sb.rpc('create_group', params: {
-          'p_name': name,
-          'p_member_ids': members,
-        });
+      final tid = res is String
+          ? res
+          : (res is Map && res['thread_id'] is String ? res['thread_id'] as String : null);
 
-        if (res is String && res.isNotEmpty) {
-          tid = res;
-        } else if (res is Map && res['thread_id'] is String) {
-          tid = res['thread_id'] as String;
-        } else if (res != null && res.toString().isNotEmpty) {
-          tid = res.toString();
-        }
-      } catch (_) {
-        // RPC might not exist; we’ll fall back to direct inserts below.
-      }
-
-      // --- Fallback: direct insert using DB defaults & policies ---
-      if (tid == null) {
-        // Insert thread (created_by should default to auth.uid() in DB)
-        final t = await _sb
-            .from('threads')
-            .insert({'type': 'group', 'name': name})
-            .select('id')
-            .single();
-        tid = t['id'] as String;
-
-        // Insert members (including self)
-        final rows = members.map((uid) => {
-          'thread_id': tid,
-          'user_id': uid,
-        }).toList();
-        await _sb.from('thread_members').insert(rows);
+      if (tid == null || tid.isEmpty) {
+        throw Exception('create_group did not return a thread id');
       }
 
       if (!mounted) return;
       Navigator.pushReplacementNamed(
         context,
         AppRoutes.thread,
-        arguments: ThreadArgs(threadId: tid!, title: name, isGroup: true),
+        arguments: ThreadArgs(threadId: tid, title: name, isGroup: true),
       );
     } on PostgrestException catch (e) {
       if (!mounted) return;
-      ScaffoldMessenger.of(context)
-          .showSnackBar(SnackBar(content: Text(e.message)));
+      ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(e.message)));
     } catch (e) {
       if (!mounted) return;
       ScaffoldMessenger.of(context)
@@ -193,8 +167,7 @@ class _NewGroupScreenState extends State<NewGroupScreen> {
                 : ListView.separated(
               padding: const EdgeInsets.all(16),
               itemCount: items.length,
-              separatorBuilder: (_, __) =>
-              const SizedBox(height: 8),
+              separatorBuilder: (_, __) => const SizedBox(height: 8),
               itemBuilder: (_, i) {
                 final p = items[i];
                 final id = p['id'] as String;
@@ -204,8 +177,7 @@ class _NewGroupScreenState extends State<NewGroupScreen> {
                   child: ListTile(
                     leading: Avatar(name: title),
                     title: Text(title,
-                        maxLines: 1,
-                        overflow: TextOverflow.ellipsis),
+                        maxLines: 1, overflow: TextOverflow.ellipsis),
                     trailing: Checkbox(
                       value: selected,
                       onChanged: (_) {
@@ -240,8 +212,7 @@ class _NewGroupScreenState extends State<NewGroupScreen> {
             ? const SizedBox(
           width: 18,
           height: 18,
-          child:
-          CircularProgressIndicator(strokeWidth: 2, color: Colors.white),
+          child: CircularProgressIndicator(strokeWidth: 2, color: Colors.white),
         )
             : const Icon(Icons.group_add),
         label: Text(_creating ? 'Creating…' : 'Create'),

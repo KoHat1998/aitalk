@@ -42,7 +42,7 @@ class _ThreadScreenState extends State<ThreadScreen> {
   final _sb = Supabase.instance.client;
 
   late final String _tid;
-  late final String _title;
+  late String _title;
 
   final _scroll = ScrollController();
 
@@ -50,16 +50,22 @@ class _ThreadScreenState extends State<ThreadScreen> {
   RealtimeChannel? _hidesChan;
   bool _loading = true;
 
-  final List<Map<String, dynamic>> _messages = []; // ordered asc
+  // messages ordered asc
+  final List<Map<String, dynamic>> _messages = [];
   final Set<String> _hidden = {};
   DateTime? _cutoff;
 
-  // Per-message download state
-  final Map<String, double> _dlProgress = {}; // 0..1
+  // group members cache (id -> profile) + owner
+  final Map<String, Map<String, dynamic>> _members = {};
+  String? _ownerId;
+
+  // per-message download state
+  final Map<String, double> _dlProgress = {};
   final Map<String, CancelToken> _dlCancels = {};
 
   static const String _storageBucket = 'chat_uploads';
   String? get _myId => _sb.auth.currentUser?.id;
+  bool get _isGroup => widget.args.isGroup;
 
   @override
   void initState() {
@@ -84,6 +90,9 @@ class _ThreadScreenState extends State<ThreadScreen> {
     setState(() => _loading = true);
     try {
       await _loadCutoff();
+      if (_isGroup) {
+        await _loadMembers(); // so we can show sender names
+      }
 
       var q = _sb
           .from('messages')
@@ -129,6 +138,37 @@ class _ThreadScreenState extends State<ThreadScreen> {
     } catch (_) {
       _cutoff = null;
     }
+  }
+
+  // NEW: load members + owner
+  Future<void> _loadMembers() async {
+    _members.clear();
+    _ownerId = null;
+    try {
+      final t = await _sb
+          .from('threads')
+          .select('created_by')
+          .eq('id', _tid)
+          .maybeSingle();
+      _ownerId = t?['created_by'] as String?;
+
+      final memRows =
+      await _sb.from('thread_members').select('user_id').eq('thread_id', _tid);
+      final ids = <String>{
+        ...(memRows as List).map((m) => (m as Map)['user_id'] as String)
+      };
+      if (ids.isEmpty) return;
+
+      final orClause = ids.map((id) => 'id.eq.$id').join(',');
+      final profs = await _sb
+          .from('users')
+          .select('id, display_name, email, avatar_url')
+          .or(orClause);
+      for (final p in profs as List) {
+        final m = Map<String, dynamic>.from(p as Map);
+        _members[m['id'] as String] = m;
+      }
+    } catch (_) {/* ignore */}
   }
 
   Future<void> _loadMyHidesFor(List<String> ids) async {
@@ -282,7 +322,6 @@ class _ThreadScreenState extends State<ThreadScreen> {
       }
     }
 
-    // path like /@lat,lng,zoom
     final joined = uri.pathSegments.join('/');
     final atIdx = joined.indexOf('@');
     if (atIdx != -1) {
@@ -297,10 +336,17 @@ class _ThreadScreenState extends State<ThreadScreen> {
     return null;
   }
 
-  // ------------------ SENDING overlays ------------------
+  // display name helper for group
+  String _displayName(String? uid) {
+    if (uid == null) return 'User';
+    final p = _members[uid];
+    final dn = (p?['display_name'] as String?)?.trim();
+    if (dn != null && dn.isNotEmpty) return dn;
+    final email = (p?['email'] as String?) ?? '';
+    return email.isNotEmpty ? email.split('@').first : 'User';
+  }
 
-  /// Simple non-blocking overlay with spinner + static label.
-  /// Returns a closer to remove the overlay.
+  // ------------------ SENDING overlays ------------------
   VoidCallback _showBusyOverlay({required String label, bool top = false}) {
     final overlay = Overlay.of(context);
     late OverlayEntry entry;
@@ -342,7 +388,6 @@ class _ThreadScreenState extends State<ThreadScreen> {
     return () => entry.remove();
   }
 
-  /// Variant with updatable label (kept for other use cases).
   VoidCallback _showBusyOverlayVN(ValueNotifier<String> labelVN, {bool top = false}) {
     final overlay = Overlay.of(context);
     late OverlayEntry entry;
@@ -417,7 +462,7 @@ class _ThreadScreenState extends State<ThreadScreen> {
     }
   }
 
-  // ------------------ ONLY CHANGE HERE ------------------
+  // ------------------ Files ------------------
   Future<void> _sendFiles(List<File> files) async {
     final me = _myId;
     if (me == null) {
@@ -426,7 +471,6 @@ class _ThreadScreenState extends State<ThreadScreen> {
     }
     if (files.isEmpty) return;
 
-    // Fixed "Uploading…" overlay just under the AppBar (no 1/N)
     final close = _showBusyOverlay(label: 'Uploading…', top: true);
 
     try {
@@ -443,14 +487,14 @@ class _ThreadScreenState extends State<ThreadScreen> {
         await _sb.from('messages').insert({
           'thread_id': _tid,
           'sender_id': me,
-          'kind': 'text', // file messages are URL-only here
+          'kind': 'text', // send URL; UI shows file card
           'body': url,
         });
       }
       _snack('Sent ${files.length} file${files.length == 1 ? '' : 's'}');
     } on StorageException catch (e) {
       _snack(e.message.contains('Bucket not found')
-          ? 'Create a Storage bucket named "$_storageBucket" (or change the name).'
+          ? 'Create a Storage bucket named "$_storageBucket".'
           : 'Storage error: ${e.message}');
     } catch (e) {
       _snack('File send failed: $e');
@@ -569,7 +613,226 @@ class _ThreadScreenState extends State<ThreadScreen> {
     );
   }
 
-  // ------------------ Inline download (per message) ------------------
+  // ------------------ Group management ------------------
+
+  Future<Set<String>> _currentMemberIds() async {
+    try {
+      final rows = await _sb
+          .from('thread_members')
+          .select('user_id')
+          .eq('thread_id', _tid);
+      return {...(rows as List).map((r) => r['user_id'] as String)};
+    } catch (_) {
+      return {};
+    }
+  }
+
+  Future<void> _openAddMembers() async {
+    final me = _myId;
+    if (me == null) {
+      _snack('Not signed in');
+      return;
+    }
+
+    try {
+      final existing = await _currentMemberIds();
+
+      // Load my contacts
+      final contacts = await _sb
+          .from('contacts')
+          .select('contact_id, created_at')
+          .eq('owner_id', me)
+          .order('created_at', ascending: false);
+
+      final ids = <String>[];
+      final seen = <String>{};
+      for (final r in contacts as List) {
+        final id = (r['contact_id'] as String?) ?? '';
+        if (id.isNotEmpty && !seen.contains(id) && !existing.contains(id)) {
+          seen.add(id);
+          ids.add(id);
+        }
+      }
+
+      if (ids.isEmpty) {
+        if (!mounted) return;
+        _snack('No eligible contacts to add.');
+        return;
+      }
+
+      final orClause = ids.map((id) => 'id.eq.$id').join(',');
+      final profs = await _sb
+          .from('users')
+          .select('id, display_name, email, avatar_url')
+          .or(orClause);
+
+      final items = (profs as List)
+          .map((p) => Map<String, dynamic>.from(p as Map))
+          .toList();
+
+      final selected = <String>{};
+
+      if (!mounted) return;
+      final ok = await showDialog<bool>(
+        context: context,
+        builder: (_) => StatefulBuilder(
+          builder: (context, setSheet) => AlertDialog(
+            title: const Text('Add members'),
+            content: SizedBox(
+              width: 380,
+              height: 420,
+              child: ListView.separated(
+                itemCount: items.length,
+                separatorBuilder: (_, __) => const Divider(height: 1),
+                itemBuilder: (_, i) {
+                  final u = items[i];
+                  final id = u['id'] as String;
+                  final dn = ((u['display_name'] as String?)?.trim().isNotEmpty == true)
+                      ? u['display_name'] as String
+                      : ((u['email'] as String?) ?? 'User');
+                  final initial = dn.isNotEmpty ? dn[0].toUpperCase() : 'U';
+                  final checked = selected.contains(id);
+                  return ListTile(
+                    leading: CircleAvatar(child: Text(initial)),
+                    title: Text(dn, maxLines: 1, overflow: TextOverflow.ellipsis),
+                    trailing: Checkbox(
+                      value: checked,
+                      onChanged: (_) {
+                        setSheet(() {
+                          if (checked) {
+                            selected.remove(id);
+                          } else {
+                            selected.add(id);
+                          }
+                        });
+                      },
+                    ),
+                    onTap: () => setSheet(() {
+                      if (selected.contains(id)) {
+                        selected.remove(id);
+                      } else {
+                        selected.add(id);
+                      }
+                    }),
+                  );
+                },
+              ),
+            ),
+            actions: [
+              TextButton(onPressed: () => Navigator.pop(context, false), child: const Text('Cancel')),
+              FilledButton(
+                onPressed: () => Navigator.pop(context, true),
+                child: const Text('Add'),
+              ),
+            ],
+          ),
+        ),
+      );
+
+      if (ok != true || selected.isEmpty) return;
+
+      // Insert members (ignore existing via conflict target)
+      final rows = selected.map((uid) => {
+        'thread_id': _tid,
+        'user_id': uid,
+      }).toList();
+
+      await _sb
+          .from('thread_members')
+          .upsert(rows, onConflict: 'thread_id,user_id');
+
+      if (_isGroup) await _loadMembers();
+      if (mounted) _snack('Added ${selected.length} member${selected.length == 1 ? '' : 's'}.');
+    } on PostgrestException catch (e) {
+      _snack(e.message);
+    } catch (e) {
+      _snack('Could not add members: $e');
+    }
+  }
+
+  Future<void> _removeMember(String userId) async {
+    try {
+      // Prefer RPC if you added it; otherwise attempt direct delete (requires owner RLS)
+      try {
+        await _sb.rpc('remove_member', params: {
+          'p_thread_id': _tid,
+          'p_user_id': userId,
+        });
+      } catch (_) {
+        await _sb.from('thread_members').delete()
+            .eq('thread_id', _tid).eq('user_id', userId);
+      }
+      await _loadMembers();
+      if (mounted) setState(() {});
+      _snack('Removed');
+    } on PostgrestException catch (e) {
+      _snack(e.message);
+    } catch (e) {
+      _snack('Remove failed: $e');
+    }
+  }
+
+  Future<void> _leaveGroup() async {
+    final ok = await showDialog<bool>(
+      context: context,
+      builder: (_) => AlertDialog(
+        title: const Text('Leave group?'),
+        content: const Text('You will stop receiving messages from this group.'),
+        actions: [
+          TextButton(onPressed: () => Navigator.pop(context, false), child: const Text('Cancel')),
+          FilledButton(onPressed: () => Navigator.pop(context, true), child: const Text('Leave')),
+        ],
+      ),
+    );
+    if (ok != true) return;
+    try {
+      await _sb.rpc('leave_group', params: {'p_thread_id': _tid});
+      if (!mounted) return;
+      Navigator.pop(context);
+    } on PostgrestException catch (e) {
+      _snack(e.message);
+    } catch (e) {
+      _snack('Could not leave group: $e');
+    }
+  }
+
+  Future<void> _renameGroup() async {
+    final controller = TextEditingController(text: _title);
+    final ok = await showDialog<bool>(
+      context: context,
+      builder: (_) => AlertDialog(
+        title: const Text('Rename group'),
+        content: TextField(
+          controller: controller,
+          autofocus: true,
+          decoration: const InputDecoration(hintText: 'Group name'),
+        ),
+        actions: [
+          TextButton(onPressed: () => Navigator.pop(context, false), child: const Text('Cancel')),
+          FilledButton(onPressed: () => Navigator.pop(context, true), child: const Text('Save')),
+        ],
+      ),
+    );
+    if (ok != true) return;
+    final newName = controller.text.trim();
+    if (newName.isEmpty || newName == _title) return;
+
+    try {
+      try {
+        await _sb.rpc('rename_group', params: {'p_thread_id': _tid, 'p_name': newName});
+      } catch (_) {
+        await _sb.from('threads').update({'name': newName}).eq('id', _tid);
+      }
+      setState(() => _title = newName);
+      _snack('Group renamed');
+    } on PostgrestException catch (e) {
+      _snack(e.message);
+    } catch (e) {
+      _snack('Rename failed: $e');
+    }
+  }
+
+  // ------------------ Inline download ------------------
   bool _isDownloading(String mid) => _dlCancels.containsKey(mid);
 
   Future<void> _startDownload({
@@ -585,7 +848,6 @@ class _ThreadScreenState extends State<ThreadScreen> {
     if (mounted) setState(() {});
 
     try {
-      // Ensure filename has extension
       String name = suggestedName.trim();
       if (!name.contains('.')) {
         final fromUrl = _fileNameFromUrl(url);
@@ -617,7 +879,6 @@ class _ThreadScreenState extends State<ThreadScreen> {
       _dlProgress[messageId] = 1.0;
       if (mounted) setState(() {});
 
-      // Save via SAF
       final tmpDir = await getTemporaryDirectory();
       final tmpFile = File(p.join(tmpDir.path, name));
       await tmpFile.writeAsBytes(bytes, flush: true);
@@ -654,7 +915,6 @@ class _ThreadScreenState extends State<ThreadScreen> {
     }
   }
 
-  // Small helper to render icon-only *pill* buttons
   Widget _iconPill({
     required IconData icon,
     required String tooltip,
@@ -681,6 +941,27 @@ class _ThreadScreenState extends State<ThreadScreen> {
       appBar: AppBar(
         title: Text(_title),
         actions: <Widget>[
+          if (_isGroup)
+            IconButton(
+              tooltip: 'Group info',
+              icon: const Icon(Icons.group_outlined),
+              onPressed: () async {
+                await showModalBottomSheet(
+                  context: context,
+                  showDragHandle: true,
+                  isScrollControlled: true,
+                  builder: (_) => _GroupInfoSheet(
+                    members: _members,
+                    ownerId: _ownerId,
+                    myId: _myId,
+                    onAddMembers: _openAddMembers,
+                    onRemoveMember: _removeMember,
+                  ),
+                );
+                await _loadMembers();
+                if (mounted) setState(() {});
+              },
+            ),
           IconButton(
             tooltip: 'Call',
             icon: const Icon(Icons.call_outlined),
@@ -689,13 +970,35 @@ class _ThreadScreenState extends State<ThreadScreen> {
           PopupMenuButton<String>(
             onSelected: (v) {
               if (v == 'clear') _clearChatForMe();
+              if (v == 'add') _openAddMembers();
+              if (v == 'leave') _leaveGroup();
+              if (v == 'rename') _renameGroup();
             },
-            itemBuilder: (context) => const <PopupMenuEntry<String>>[
-              PopupMenuItem<String>(
-                value: 'clear',
-                child: Text('Clear chat for me'),
-              ),
-            ],
+            itemBuilder: (context) {
+              final items = <PopupMenuEntry<String>>[
+                const PopupMenuItem<String>(
+                  value: 'clear',
+                  child: Text('Clear chat for me'),
+                ),
+              ];
+              if (_isGroup) {
+                items.addAll(const [
+                  PopupMenuItem<String>(
+                    value: 'add',
+                    child: Text('Add members'),
+                  ),
+                  PopupMenuItem<String>(
+                    value: 'rename',
+                    child: Text('Rename group'),
+                  ),
+                  PopupMenuItem<String>(
+                    value: 'leave',
+                    child: Text('Leave group'),
+                  ),
+                ]);
+              }
+              return items;
+            },
           ),
         ],
       ),
@@ -711,6 +1014,7 @@ class _ThreadScreenState extends State<ThreadScreen> {
               itemBuilder: (context, i) {
                 final m = visible[i];
                 final isMe = m['sender_id'] == _myId;
+                final senderId = m['sender_id'] as String?;
                 final kind = (m['kind'] as String?) ?? 'text';
                 final body = (m['body'] as String?) ?? '';
                 final deleted =
@@ -725,7 +1029,15 @@ class _ThreadScreenState extends State<ThreadScreen> {
                   ts = raw;
                 }
 
-                // 1) Map preview (from columns or maps URL)
+                // show sender name on group when sender changes and it's not me
+                bool showName = false;
+                if (_isGroup) {
+                  final prev = i > 0 ? visible[i - 1] : null;
+                  final prevSender = prev?['sender_id'];
+                  showName = !isMe && (prevSender != senderId);
+                }
+
+                // 1) Map preview
                 final latCol = (m['location_lat'] as num?)?.toDouble();
                 final lngCol = (m['location_lng'] as num?)?.toDouble();
                 LatLng? point;
@@ -747,104 +1059,122 @@ class _ThreadScreenState extends State<ThreadScreen> {
                         : Alignment.centerLeft,
                     child: ConstrainedBox(
                       constraints: const BoxConstraints(maxWidth: 320),
-                      child: Card(
-                        margin: const EdgeInsets.symmetric(
-                            vertical: 6, horizontal: 6),
-                        clipBehavior: Clip.antiAlias,
-                        shape: RoundedRectangleBorder(
-                            borderRadius: BorderRadius.circular(14)),
-                        child: InkWell(
-                          onTap: () => _openUrl(mapsUrl),
-                          onLongPress: () => _showMessageActions(m),
-                          child: Column(
-                            crossAxisAlignment:
-                            CrossAxisAlignment.stretch,
-                            children: [
-                              SizedBox(
-                                height: 160,
-                                child: FlutterMap(
-                                  options: MapOptions(
-                                    initialCenter: point,
-                                    initialZoom: 15,
-                                    interactionOptions:
-                                    const InteractionOptions(
-                                      flags: InteractiveFlag.none,
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          if (showName)
+                            Padding(
+                              padding: const EdgeInsets.only(left: 8, bottom: 2),
+                              child: Text(
+                                _displayName(senderId),
+                                style: TextStyle(
+                                  fontSize: 12,
+                                  color: Colors.grey.shade500,
+                                  fontWeight: FontWeight.w600,
+                                ),
+                              ),
+                            ),
+                          Card(
+                            margin: const EdgeInsets.symmetric(
+                                vertical: 6, horizontal: 6),
+                            clipBehavior: Clip.antiAlias,
+                            shape: RoundedRectangleBorder(
+                                borderRadius: BorderRadius.circular(14)),
+                            child: InkWell(
+                              onTap: () => _openUrl(mapsUrl),
+                              onLongPress: () => _showMessageActions(m),
+                              child: Column(
+                                crossAxisAlignment:
+                                CrossAxisAlignment.stretch,
+                                children: [
+                                  SizedBox(
+                                    height: 160,
+                                    child: FlutterMap(
+                                      options: MapOptions(
+                                        initialCenter: point,
+                                        initialZoom: 15,
+                                        interactionOptions:
+                                        const InteractionOptions(
+                                          flags: InteractiveFlag.none,
+                                        ),
+                                      ),
+                                      children: [
+                                        TileLayer(
+                                          urlTemplate:
+                                          'https://{s}.basemaps.cartocdn.com/light_all/{z}/{x}/{y}{r}.png',
+                                          subdomains: const [
+                                            'a',
+                                            'b',
+                                            'c',
+                                            'd'
+                                          ],
+                                          userAgentPackageName:
+                                          'com.yourcompany.yourapp',
+                                        ),
+                                        MarkerLayer(markers: [
+                                          Marker(
+                                            point: point,
+                                            width: 40,
+                                            height: 40,
+                                            child: const Icon(
+                                              Icons.location_on,
+                                              size: 36,
+                                              color: Colors.red,
+                                            ),
+                                          ),
+                                        ]),
+                                      ],
                                     ),
                                   ),
-                                  children: [
-                                    // Use Carto tiles to avoid OSM "blocked" banners
-                                    TileLayer(
-                                      urlTemplate:
-                                      'https://{s}.basemaps.cartocdn.com/light_all/{z}/{x}/{y}{r}.png',
-                                      subdomains: const [
-                                        'a',
-                                        'b',
-                                        'c',
-                                        'd'
+                                  Container(
+                                    color: Theme.of(context)
+                                        .colorScheme
+                                        .surface,
+                                    padding: const EdgeInsets.symmetric(
+                                        horizontal: 12, vertical: 8),
+                                    child: Row(
+                                      children: [
+                                        const Icon(Icons.map, size: 18),
+                                        const SizedBox(width: 8),
+                                        Expanded(
+                                          child: Text(
+                                            'Open in Google Maps',
+                                            overflow:
+                                            TextOverflow.ellipsis,
+                                            style: TextStyle(
+                                              decoration:
+                                              TextDecoration.underline,
+                                              color: Theme.of(context)
+                                                  .colorScheme
+                                                  .primary,
+                                              fontWeight: FontWeight.w600,
+                                            ),
+                                          ),
+                                        ),
+                                        Text(
+                                          timeOfDay(ts),
+                                          style: TextStyle(
+                                              fontSize: 11,
+                                              color:
+                                              Colors.grey.shade600),
+                                        ),
                                       ],
-                                      userAgentPackageName:
-                                      'com.yourcompany.yourapp',
                                     ),
-                                    MarkerLayer(markers: [
-                                      Marker(
-                                        point: point,
-                                        width: 40,
-                                        height: 40,
-                                        child: const Icon(
-                                          Icons.location_on,
-                                          size: 36,
-                                          color: Colors.red,
-                                        ),
-                                      ),
-                                    ]),
-                                  ],
-                                ),
+                                  ),
+                                ],
                               ),
-                              Container(
-                                color: Theme.of(context)
-                                    .colorScheme
-                                    .surface,
-                                padding: const EdgeInsets.symmetric(
-                                    horizontal: 12, vertical: 8),
-                                child: Row(
-                                  children: [
-                                    const Icon(Icons.map, size: 18),
-                                    const SizedBox(width: 8),
-                                    Expanded(
-                                      child: Text(
-                                        'Open in Google Maps',
-                                        overflow: TextOverflow.ellipsis,
-                                        style: TextStyle(
-                                          decoration:
-                                          TextDecoration.underline,
-                                          color: Theme.of(context)
-                                              .colorScheme
-                                              .primary,
-                                          fontWeight: FontWeight.w600,
-                                        ),
-                                      ),
-                                    ),
-                                    Text(
-                                      timeOfDay(ts),
-                                      style: TextStyle(
-                                          fontSize: 11,
-                                          color: Colors.grey.shade600),
-                                    ),
-                                  ],
-                                ),
-                              ),
-                            ],
+                            ),
                           ),
-                        ),
+                        ],
                       ),
                     ),
                   );
                 }
 
-                // 2) File/media message card (URL with extension)
+                // 2) File/media card
                 final isLink = !deleted && _isUrl(body);
-                final looksFile = isLink &&
-                    _ext(_fileNameFromUrl(body)).isNotEmpty;
+                final looksFile =
+                    isLink && _ext(_fileNameFromUrl(body)).isNotEmpty;
 
                 if (!deleted && looksFile) {
                   final name = _fileNameFromUrl(body);
@@ -853,9 +1183,8 @@ class _ThreadScreenState extends State<ThreadScreen> {
                   final mid = m['id'] as String;
                   final downloading = _isDownloading(mid);
                   final prog = _dlProgress[mid] ?? 0.0;
-                  final pct = (prog * 100)
-                      .clamp(0, 100)
-                      .toStringAsFixed(0);
+                  final pct =
+                  (prog * 100).clamp(0, 100).toStringAsFixed(0);
 
                   return Align(
                     alignment: isMe
@@ -863,107 +1192,129 @@ class _ThreadScreenState extends State<ThreadScreen> {
                         : Alignment.centerLeft,
                     child: ConstrainedBox(
                       constraints: const BoxConstraints(maxWidth: 320),
-                      child: Card(
-                        margin: const EdgeInsets.symmetric(
-                            vertical: 6, horizontal: 6),
-                        child: InkWell(
-                          onLongPress: () => _showMessageActions(m),
-                          onTap: () => _openUrl(body),
-                          borderRadius: BorderRadius.circular(12),
-                          child: Padding(
-                            padding: const EdgeInsets.all(12),
-                            child: Column(
-                              crossAxisAlignment:
-                              CrossAxisAlignment.start,
-                              children: [
-                                Row(
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          if (showName)
+                            Padding(
+                              padding: const EdgeInsets.only(left: 8, bottom: 2),
+                              child: Text(
+                                _displayName(senderId),
+                                style: TextStyle(
+                                  fontSize: 12,
+                                  color: Colors.grey.shade500,
+                                  fontWeight: FontWeight.w600,
+                                ),
+                              ),
+                            ),
+                          Card(
+                            margin: const EdgeInsets.symmetric(
+                                vertical: 6, horizontal: 6),
+                            child: InkWell(
+                              onLongPress: () => _showMessageActions(m),
+                              onTap: () => _openUrl(body),
+                              borderRadius: BorderRadius.circular(12),
+                              child: Padding(
+                                padding: const EdgeInsets.all(12),
+                                child: Column(
                                   crossAxisAlignment:
                                   CrossAxisAlignment.start,
                                   children: [
-                                    Icon(
-                                      isImg
-                                          ? Icons.image_outlined
-                                          : isVid
-                                          ? Icons.videocam_outlined
-                                          : Icons
-                                          .insert_drive_file_outlined,
-                                      size: 24,
+                                    Row(
+                                      crossAxisAlignment:
+                                      CrossAxisAlignment.start,
+                                      children: [
+                                        Icon(
+                                          isImg
+                                              ? Icons.image_outlined
+                                              : isVid
+                                              ? Icons
+                                              .videocam_outlined
+                                              : Icons
+                                              .insert_drive_file_outlined,
+                                          size: 24,
+                                        ),
+                                        const SizedBox(width: 10),
+                                        Expanded(
+                                          child: Text(
+                                            name,
+                                            maxLines: 2,
+                                            overflow:
+                                            TextOverflow.ellipsis,
+                                            style: const TextStyle(
+                                                fontWeight:
+                                                FontWeight.w600),
+                                          ),
+                                        ),
+                                      ],
                                     ),
-                                    const SizedBox(width: 10),
-                                    Expanded(
-                                      child: Text(
-                                        name,
-                                        maxLines: 2,
-                                        overflow: TextOverflow.ellipsis,
-                                        style: const TextStyle(
-                                            fontWeight: FontWeight.w600),
+                                    const SizedBox(height: 10),
+                                    if (downloading) ...[
+                                      LinearProgressIndicator(
+                                          value: prog == 0 ? null : prog),
+                                      const SizedBox(height: 8),
+                                      Row(
+                                        children: [
+                                          Text('$pct%',
+                                              style: Theme.of(context)
+                                                  .textTheme
+                                                  .labelMedium),
+                                          const Spacer(),
+                                          TextButton.icon(
+                                            icon:
+                                            const Icon(Icons.close),
+                                            label: const Text('Cancel'),
+                                            onPressed: () =>
+                                                _cancelDownload(mid),
+                                          ),
+                                        ],
                                       ),
-                                    ),
+                                    ] else ...[
+                                      Row(
+                                        children: [
+                                          _iconPill(
+                                            icon: Icons
+                                                .download_rounded,
+                                            tooltip: 'Download',
+                                            onPressed: () =>
+                                                _startDownload(
+                                                  messageId: mid,
+                                                  url: body,
+                                                  suggestedName: name,
+                                                ),
+                                          ),
+                                          const SizedBox(width: 6),
+                                          _iconPill(
+                                            icon:
+                                            Icons.share_outlined,
+                                            tooltip: 'Share',
+                                            onPressed: () => Share.share(
+                                                body,
+                                                subject: name),
+                                          ),
+                                          const Spacer(),
+                                          Text(
+                                            timeOfDay(ts),
+                                            style: TextStyle(
+                                                fontSize: 11,
+                                                color: Colors
+                                                    .grey.shade600),
+                                          ),
+                                        ],
+                                      ),
+                                    ],
                                   ],
                                 ),
-                                const SizedBox(height: 10),
-
-                                // Inline progress OR actions
-                                if (downloading) ...[
-                                  LinearProgressIndicator(
-                                      value: prog == 0 ? null : prog),
-                                  const SizedBox(height: 8),
-                                  Row(
-                                    children: [
-                                      Text('$pct%',
-                                          style: Theme.of(context)
-                                              .textTheme
-                                              .labelMedium),
-                                      const Spacer(),
-                                      TextButton.icon(
-                                        icon: const Icon(Icons.close),
-                                        label: const Text('Cancel'),
-                                        onPressed: () =>
-                                            _cancelDownload(mid),
-                                      ),
-                                    ],
-                                  ),
-                                ] else ...[
-                                  Row(
-                                    children: [
-                                      _iconPill(
-                                        icon: Icons.download_rounded,
-                                        tooltip: 'Download',
-                                        onPressed: () => _startDownload(
-                                          messageId: mid,
-                                          url: body,
-                                          suggestedName: name,
-                                        ),
-                                      ),
-                                      const SizedBox(width: 6),
-                                      _iconPill(
-                                        icon: Icons.share_outlined,
-                                        tooltip: 'Share',
-                                        onPressed: () => Share.share(
-                                            body,
-                                            subject: name),
-                                      ),
-                                      const Spacer(),
-                                      Text(
-                                        timeOfDay(ts),
-                                        style: TextStyle(
-                                            fontSize: 11,
-                                            color:
-                                            Colors.grey.shade600),
-                                      ),
-                                    ],
-                                  ),
-                                ],
-                              ],
+                              ),
                             ),
                           ),
-                        ),
+                        ],
                       ),
                     ),
                   );
                 }
 
-                // 3) Regular text bubble (includes link-only messages)
+                // 3) Text bubble
                 final Color? textColor = deleted
                     ? Colors.grey.shade600
                     : (isLink
@@ -975,50 +1326,66 @@ class _ThreadScreenState extends State<ThreadScreen> {
                       ? Alignment.centerRight
                       : Alignment.centerLeft,
                   child: ConstrainedBox(
-                    constraints:
-                    const BoxConstraints(maxWidth: 320),
-                    child: Card(
-                      color: isMe
-                          ? Theme.of(context)
-                          .colorScheme
-                          .primaryContainer
-                          : null,
-                      margin: const EdgeInsets.symmetric(
-                          vertical: 4, horizontal: 6),
-                      child: InkWell(
-                        onLongPress: () => _showMessageActions(m),
-                        onTap: isLink ? () => _openUrl(body) : null,
-                        borderRadius: BorderRadius.circular(12),
-                        child: Padding(
-                          padding: const EdgeInsets.all(12),
-                          child: Column(
-                            crossAxisAlignment:
-                            CrossAxisAlignment.start,
-                            children: [
-                              Text(
-                                deleted ? 'Message deleted' : body,
-                                style: TextStyle(
-                                  fontSize: 15,
-                                  fontStyle: deleted
-                                      ? FontStyle.italic
-                                      : FontStyle.normal,
-                                  color: textColor,
-                                  decoration: isLink
-                                      ? TextDecoration.underline
-                                      : TextDecoration.none,
-                                ),
+                    constraints: const BoxConstraints(maxWidth: 320),
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        if (showName)
+                          Padding(
+                            padding: const EdgeInsets.only(left: 8, bottom: 2),
+                            child: Text(
+                              _displayName(senderId),
+                              style: TextStyle(
+                                fontSize: 12,
+                                color: Colors.grey.shade500,
+                                fontWeight: FontWeight.w600,
                               ),
-                              const SizedBox(height: 6),
-                              Text(
-                                timeOfDay(ts),
-                                style: TextStyle(
-                                    fontSize: 11,
-                                    color: Colors.grey.shade600),
+                            ),
+                          ),
+                        Card(
+                          color: isMe
+                              ? Theme.of(context)
+                              .colorScheme
+                              .primaryContainer
+                              : null,
+                          margin: const EdgeInsets.symmetric(
+                              vertical: 4, horizontal: 6),
+                          child: InkWell(
+                            onLongPress: () => _showMessageActions(m),
+                            onTap: isLink ? () => _openUrl(body) : null,
+                            borderRadius: BorderRadius.circular(12),
+                            child: Padding(
+                              padding: const EdgeInsets.all(12),
+                              child: Column(
+                                crossAxisAlignment:
+                                CrossAxisAlignment.start,
+                                children: [
+                                  Text(
+                                    deleted ? 'Message deleted' : body,
+                                    style: TextStyle(
+                                      fontSize: 15,
+                                      fontStyle: deleted
+                                          ? FontStyle.italic
+                                          : FontStyle.normal,
+                                      color: textColor,
+                                      decoration: isLink
+                                          ? TextDecoration.underline
+                                          : TextDecoration.none,
+                                    ),
+                                  ),
+                                  const SizedBox(height: 6),
+                                  Text(
+                                    timeOfDay(ts),
+                                    style: TextStyle(
+                                        fontSize: 11,
+                                        color: Colors.grey.shade600),
+                                  ),
+                                ],
                               ),
-                            ],
+                            ),
                           ),
                         ),
-                      ),
+                      ],
                     ),
                   ),
                 );
@@ -1117,7 +1484,7 @@ class _ThreadScreenState extends State<ThreadScreen> {
       _snack('Not signed in');
       return;
     }
-    if (widget.args.isGroup) {
+    if (_isGroup) {
       _snack('Group calls are not available yet');
       return;
     }
@@ -1167,5 +1534,109 @@ class _ThreadScreenState extends State<ThreadScreen> {
     final m = t.minute.toString().padLeft(2, '0');
     final ampm = t.hour >= 12 ? 'PM' : 'AM';
     return '$h:$m $ampm';
+  }
+}
+
+// ------------------ Group info sheet ------------------
+
+class _GroupInfoSheet extends StatelessWidget {
+  final Map<String, Map<String, dynamic>> members;
+  final String? ownerId;
+  final String? myId;
+  final Future<void> Function() onAddMembers;
+  final Future<void> Function(String userId) onRemoveMember;
+
+  const _GroupInfoSheet({
+    required this.members,
+    required this.ownerId,
+    required this.myId,
+    required this.onAddMembers,
+    required this.onRemoveMember,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    final entries = members.entries.toList()
+      ..sort((a, b) {
+        if (a.key == ownerId && b.key != ownerId) return -1;
+        if (b.key == ownerId && a.key != ownerId) return 1;
+        final an = _label(a.value).toLowerCase();
+        final bn = _label(b.value).toLowerCase();
+        return an.compareTo(bn);
+      });
+
+    final isOwner = ownerId != null && myId == ownerId;
+
+    return SafeArea(
+      child: Padding(
+        padding: const EdgeInsets.only(bottom: 12),
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            const ListTile(
+              leading: Icon(Icons.group),
+              title: Text('Group members'),
+            ),
+            Flexible(
+              child: ListView.separated(
+                shrinkWrap: true,
+                itemCount: entries.length,
+                separatorBuilder: (_, __) => const Divider(height: 1),
+                itemBuilder: (_, i) {
+                  final e = entries[i];
+                  final uid = e.key;
+                  final owner = uid == ownerId;
+                  final me = uid == myId;
+                  return ListTile(
+                    leading: const CircleAvatar(child: Icon(Icons.person)),
+                    title: Text(_label(e.value)),
+                    subtitle: Text(owner ? 'Owner' : (me ? 'You' : 'Member')),
+                    trailing: (isOwner && !owner)
+                        ? IconButton(
+                      tooltip: 'Remove',
+                      icon: const Icon(Icons.person_remove),
+                      onPressed: () async {
+                        final ok = await showDialog<bool>(
+                          context: context,
+                          builder: (_) => AlertDialog(
+                            title: const Text('Remove member?'),
+                            content: Text('Remove ${_label(e.value)} from this group?'),
+                            actions: [
+                              TextButton(onPressed: () => Navigator.pop(context, false), child: const Text('Cancel')),
+                              FilledButton(onPressed: () => Navigator.pop(context, true), child: const Text('Remove')),
+                            ],
+                          ),
+                        );
+                        if (ok == true) {
+                          await onRemoveMember(uid);
+                        }
+                      },
+                    )
+                        : null,
+                  );
+                },
+              ),
+            ),
+            const Divider(height: 1),
+            if (isOwner)
+              Padding(
+                padding: const EdgeInsets.all(12),
+                child: FilledButton.icon(
+                  icon: const Icon(Icons.person_add_alt_1),
+                  label: const Text('Add members'),
+                  onPressed: onAddMembers,
+                ),
+              ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  static String _label(Map<String, dynamic> u) {
+    final dn = (u['display_name'] as String?)?.trim();
+    if (dn != null && dn.isNotEmpty) return dn;
+    final email = (u['email'] as String?) ?? '';
+    return email.isNotEmpty ? email.split('@').first : 'User';
   }
 }
