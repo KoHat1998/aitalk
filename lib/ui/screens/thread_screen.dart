@@ -18,6 +18,7 @@ import 'package:url_launcher/url_launcher.dart';
 import '../../core/app_routes.dart';
 import 'outgoing_call_screen.dart' show OutgoingCallArgs;
 import '../widgets/chat_input_bar.dart';
+import 'group_room_screen.dart';
 
 // In-app viewers
 import 'video_player_screen.dart';
@@ -1448,14 +1449,14 @@ class _ThreadScreenState extends State<ThreadScreen> {
           children: [
             ListTile(
                 leading: const Icon(Icons.call),
-                title: const Text('Audio call'),
+                title: Text(_isGroup ? 'Join audio room' : 'Audio call'),
                 onTap: () {
                   Navigator.pop(context);
                   _startCall(video: false);
                 }),
             ListTile(
                 leading: const Icon(Icons.videocam),
-                title: const Text('Video call'),
+                title: Text(_isGroup ? 'Join video room' : 'Video call'),
                 onTap: () {
                   Navigator.pop(context);
                   _startCall(video: true);
@@ -1472,10 +1473,24 @@ class _ThreadScreenState extends State<ThreadScreen> {
       _snack('Not signed in');
       return;
     }
+
+    // GROUP: jump straight into the LiveKit room for this thread
     if (_isGroup) {
-      _snack('Group calls are not available yet');
+      if (!mounted) return;
+      Navigator.push(
+        context,
+        MaterialPageRoute(
+          builder: (_) => GroupRoomScreen(
+            threadId: _tid,
+            title: _title,
+            video: true, // false => audio-only join
+          ),
+        ),
+      );
       return;
     }
+
+    // 1v1: keep your ringing/invite flow
     try {
       final memRows = await _sb
           .from('thread_members')
