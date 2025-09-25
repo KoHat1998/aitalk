@@ -1,11 +1,11 @@
 import 'package:flutter/material.dart';
-import 'package:supabase_flutter/supabase_flutter.dart';
 import 'package:google_mobile_ads/google_mobile_ads.dart';
+import 'package:supabase_flutter/supabase_flutter.dart';
 
 import '../../core/app_routes.dart';
+import '../widgets/avatar.dart';
 import '../widgets/empty_state.dart';
 import 'thread_screen.dart'; // for ThreadArgs
-import '../widgets/avatar.dart';
 
 class ChatsScreen extends StatefulWidget {
   const ChatsScreen({super.key});
@@ -29,6 +29,7 @@ class _ChatsScreenState extends State<ChatsScreen> {
   // ---- Ad banner ----
   BannerAd? _bannerAd;
   bool _isBannerAdLoaded = false;
+  // Test unit id (ok to ship while testing)
   final String _bannerAdUnitId = 'ca-app-pub-3940256099942544/6300978111';
 
   @override
@@ -198,30 +199,56 @@ class _ChatsScreenState extends State<ChatsScreen> {
     if (mounted) _load(); // refresh after returning
   }
 
+  // ===== confirm dialog =====
+  Future<bool> _confirmClearChat() async {
+    final cs = Theme.of(context).colorScheme;
+
+    final result = await showDialog<bool>(
+      context: context,
+      barrierDismissible: true,
+      useRootNavigator: true,
+      builder: (ctx) => AlertDialog(
+        insetPadding: const EdgeInsets.symmetric(horizontal: 24, vertical: 24),
+        title: Row(
+          children: [
+            Icon(Icons.warning_amber_rounded, color: cs.error),
+            const SizedBox(width: 8),
+            const Text('Clear chat history?'),
+          ],
+        ),
+        content: const Text(
+          'This clears your copy of the conversation and removes it from the list. '
+              'New messages will show up as a fresh chat; old messages will not reappear.',
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(ctx).pop(false),
+            child: const Text('Cancel'),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.of(ctx).pop(true),
+            child: const Text('Clear'),
+          ),
+        ],
+      ),
+    );
+    return result ?? false;
+  }
+
   // ===== Clear chat history for me (sets cutoff and hides from list now) =====
   Future<void> _deleteChatForMe(Map<String, dynamic> row) async {
     final threadId = (row['thread_id'] as String?) ?? row['thread_id'].toString();
 
-    final ok = await showDialog<bool>(
-      context: context,
-      builder: (_) => const AlertDialog(
-        title: Text('Clear chat history?'),
-        content: Text(
-          'This clears your copy of the conversation and removes it from the list. '
-              'New messages will show up as a fresh chat; old messages will not reappear.',
-        ),
-      ),
-    );
-
-    if (ok != true) return;
+    final ok = await _confirmClearChat();
+    if (!ok) return;
 
     try {
+      // Your RPC that sets/updates thread_resets and hides it from list
       await _sb.rpc('reset_thread', params: {'p_thread_id': threadId});
 
+      // Remove locally
       _items.removeWhere(
-            (it) =>
-        ((it['thread_id'] as String?) ?? it['thread_id'].toString()) ==
-            threadId,
+            (it) => ((it['thread_id'] as String?) ?? it['thread_id'].toString()) == threadId,
       );
       _previews.remove(threadId);
       _cutoffs.remove(threadId);
@@ -260,8 +287,7 @@ class _ChatsScreenState extends State<ChatsScreen> {
           itemBuilder: (context, i) {
             final row = _items[i];
             final title = _titleFor(row);
-            final tid =
-                (row['thread_id'] as String?) ?? row['thread_id'].toString();
+            final tid = (row['thread_id'] as String?) ?? row['thread_id'].toString();
             final subtitle =
                 _previews[tid] ?? (row['last_message'] as String?) ?? 'Say hi 👋';
 
@@ -273,8 +299,7 @@ class _ChatsScreenState extends State<ChatsScreen> {
                   // url: row['item_avatar_url'] as String?,
                 ),
                 title: Text(title, maxLines: 1, overflow: TextOverflow.ellipsis),
-                subtitle:
-                Text(subtitle, maxLines: 1, overflow: TextOverflow.ellipsis),
+                subtitle: Text(subtitle, maxLines: 1, overflow: TextOverflow.ellipsis),
                 onTap: () => _openThread(row),
                 trailing: PopupMenuButton<String>(
                   onSelected: (v) {
@@ -298,7 +323,8 @@ class _ChatsScreenState extends State<ChatsScreen> {
               ),
               confirmDismiss: (_) async {
                 await _deleteChatForMe(row);
-                return false; // already updated locally if successful
+                // We remove the item ourselves after a successful clear
+                return false;
               },
               child: tile,
             );

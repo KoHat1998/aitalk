@@ -6,19 +6,37 @@ import 'package:flutter/material.dart';
 import 'package:livekit_client/livekit_client.dart';
 import 'package:permission_handler/permission_handler.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
+import 'package:flutter_webrtc/flutter_webrtc.dart' as rtc;
 
-import '../../core/env.dart'; // uses LIVEKIT_HOST from .env
+import '../../core/env.dart'; // exposes Env.livekitHost (from your .env)
+
+/*
+  Usage:
+  Navigator.push(
+    context,
+    MaterialPageRoute(
+      builder: (_) => GroupRoomScreen(
+        threadId: '<thread-id>',
+        title: 'Team Standup',
+        video: true,   // join with camera enabled
+        audio: true,   // join with microphone enabled
+      ),
+    ),
+  );
+*/
 
 class GroupRoomScreen extends StatefulWidget {
   final String threadId;
   final String title;
-  final bool video; // if false, join with camera off
+  final bool video; // start with local camera ON
+  final bool audio; // start with local mic ON
 
   const GroupRoomScreen({
     super.key,
     required this.threadId,
     required this.title,
     this.video = true,
+    this.audio = true,
   });
 
   @override
@@ -57,26 +75,27 @@ class _GroupRoomScreenState extends State<GroupRoomScreen> {
     });
 
     try {
-      // 1) Get LiveKit access token from your edge function
+      // 1) Fetch LiveKit access token from your Edge Function
       final resp = await _sb.functions.invoke('lk_token', body: {
         'threadId': widget.threadId,
       });
       final data = resp.data;
-      final token =
-      (data is Map && data['token'] is String) ? data['token'] as String : null;
+      final token = (data is Map && data['token'] is String)
+          ? data['token'] as String
+          : null;
       if (token == null || token.isEmpty) {
         throw Exception('Token missing from lk_token response');
       }
 
-      // 2) Ask permissions on mobile (camera/mic)
+      // 2) Permissions (mobile)
       if (!kIsWeb && (Platform.isAndroid || Platform.isIOS)) {
         await _ensureCallPermissions(needCamera: widget.video);
       }
 
-      // 3) Connect to room
+      // 3) Connect to LiveKit room
       final livekitUrl = Env.livekitHost.trim();
       if (livekitUrl.isEmpty || !livekitUrl.startsWith('wss://')) {
-        throw Exception('LIVEKIT_HOST is missing or not a wss:// URL in .env');
+        throw Exception('LIVEKIT_HOST is missing or must be a wss:// URL in .env');
       }
 
       final room = Room();
@@ -89,19 +108,30 @@ class _GroupRoomScreenState extends State<GroupRoomScreen> {
           defaultCameraCaptureOptions: const CameraCaptureOptions(
             cameraPosition: CameraPosition.front,
           ),
-          // NOTE: correct name is defaultAudioCaptureOptions (not defaultMicrophoneCaptureOptions)
+          // Correct prop name:
           defaultAudioCaptureOptions: const AudioCaptureOptions(),
         ),
-        connectOptions: const ConnectOptions(autoSubscribe: true),
+        connectOptions: const ConnectOptions(
+          autoSubscribe: true, // subscribe to remote tracks automatically
+        ),
       );
 
-      // 4) Apply initial local state
-      _micEnabled = true;
+      // Web browsers often require a user gesture to start audio playback.
+      if (kIsWeb) {
+        await room.startAudio();
+      } else if (Platform.isAndroid || Platform.isIOS) {
+        // Route audio to the loud-speaker so you can hear the call
+        await rtc.Helper.setSpeakerphoneOn(true);
+      }
+
+      // 4) Initial local state (respect widget flags)
+      _micEnabled = widget.audio;
       _camEnabled = widget.video;
+
       await room.localParticipant?.setMicrophoneEnabled(_micEnabled);
       await room.localParticipant?.setCameraEnabled(_camEnabled);
 
-      // 5) Listen for room updates (adds/removes participants, tracks, etc.)
+      // 5) Listen for room updates
       room.addListener(_onRoomChanged);
 
       setState(() {
@@ -159,8 +189,9 @@ class _GroupRoomScreenState extends State<GroupRoomScreen> {
       }
 
       if (localCam != null) {
-        final next =
-        _camPos == CameraPosition.front ? CameraPosition.back : CameraPosition.front;
+        final next = _camPos == CameraPosition.front
+            ? CameraPosition.back
+            : CameraPosition.front;
         await localCam.setCameraPosition(next);
         setState(() => _camPos = next);
       }
@@ -176,7 +207,7 @@ class _GroupRoomScreenState extends State<GroupRoomScreen> {
 
   // ---------- Permissions ----------
   Future<void> _ensureCallPermissions({required bool needCamera}) async {
-    if (kIsWeb) return; // browser asks itself
+    if (kIsWeb) return; // browser prompts as needed
     if (!(Platform.isAndroid || Platform.isIOS)) return;
 
     final req = <Permission>[
@@ -195,7 +226,8 @@ class _GroupRoomScreenState extends State<GroupRoomScreen> {
           s.isLimited;
     }
 
-    if (denied(Permission.microphone) || (needCamera && denied(Permission.camera))) {
+    if (denied(Permission.microphone) ||
+        (needCamera && denied(Permission.camera))) {
       throw Exception('Camera/Microphone permission not granted');
     }
   }
@@ -215,13 +247,12 @@ class _GroupRoomScreenState extends State<GroupRoomScreen> {
   }
 
   String _labelFor(Participant p) {
-    // LiveKit sets "name" from the token's 'name' claim. Fallback to identity.
+    // LiveKit sets 'name' from the token's 'name' claim. Fallback to identity.
     final name = (p.name.isNotEmpty ? p.name : p.identity).trim();
     return name.isNotEmpty ? name : 'User';
   }
 
   VideoTrack? _firstVideoTrack(Participant p) {
-    // Prefer an enabled/published camera track
     for (final pub in p.videoTrackPublications) {
       final t = pub.track;
       if (t is VideoTrack) return t;
@@ -281,8 +312,10 @@ class _GroupRoomScreenState extends State<GroupRoomScreen> {
               ),
             )
                 : GridView.builder(
-              padding: const EdgeInsets.fromLTRB(12, 12, 12, 120),
-              gridDelegate: SliverGridDelegateWithFixedCrossAxisCount(
+              padding:
+              const EdgeInsets.fromLTRB(12, 12, 12, 120),
+              gridDelegate:
+              SliverGridDelegateWithFixedCrossAxisCount(
                 crossAxisCount: _gridCrossAxisCount(count),
                 mainAxisSpacing: 8,
                 crossAxisSpacing: 8,
@@ -292,7 +325,8 @@ class _GroupRoomScreenState extends State<GroupRoomScreen> {
               itemBuilder: (_, i) {
                 final p = participants[i];
                 final vTrack = _firstVideoTrack(p);
-                final isLocal = identical(p, _room?.localParticipant);
+                final isLocal =
+                identical(p, _room?.localParticipant);
                 return _ParticipantTile(
                   participant: p,
                   track: vTrack,
@@ -310,7 +344,8 @@ class _GroupRoomScreenState extends State<GroupRoomScreen> {
             child: SafeArea(
               top: false,
               child: Padding(
-                padding: const EdgeInsets.fromLTRB(16, 8, 16, 16),
+                padding:
+                const EdgeInsets.fromLTRB(16, 8, 16, 16),
                 child: _ControlsBar(
                   micOn: _micEnabled,
                   camOn: _camEnabled,
@@ -345,7 +380,8 @@ class _ParticipantTile extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final borderColor = participant.isSpeaking ? Colors.greenAccent : Colors.white24;
+    final borderColor =
+    participant.isSpeaking ? Colors.greenAccent : Colors.white24;
 
     return ClipRRect(
       borderRadius: BorderRadius.circular(12),
@@ -355,7 +391,7 @@ class _ParticipantTile extends StatelessWidget {
           // Video or placeholder
           if (track != null)
             VideoTrackRenderer(
-              track!, // positional parameter
+              track!, // positional arg in livekit_client
               fit: VideoViewFit.cover,
             )
           else
@@ -373,13 +409,14 @@ class _ParticipantTile extends StatelessWidget {
               ),
             ),
 
-          // Name & "local" badge
+          // Name & "you" badge
           Positioned(
             left: 8,
             right: 8,
             bottom: 8,
             child: Container(
-              padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 6),
+              padding:
+              const EdgeInsets.symmetric(horizontal: 8, vertical: 6),
               decoration: BoxDecoration(
                 color: Colors.black54,
                 borderRadius: BorderRadius.circular(8),
@@ -403,7 +440,8 @@ class _ParticipantTile extends StatelessWidget {
                       padding: EdgeInsets.only(left: 6),
                       child: Text(
                         'you',
-                        style: TextStyle(color: Colors.white70, fontSize: 12),
+                        style:
+                        TextStyle(color: Colors.white70, fontSize: 12),
                       ),
                     ),
                 ],
@@ -520,11 +558,14 @@ class _ParticipantsSheet extends StatelessWidget {
         final label = labelFor(p);
         return ListTile(
           leading: CircleAvatar(
-            child: Text((label.isNotEmpty ? label[0] : 'U').toUpperCase()),
+            child:
+            Text((label.isNotEmpty ? label[0] : 'U').toUpperCase()),
           ),
-          title: Text(label, maxLines: 1, overflow: TextOverflow.ellipsis),
+          title:
+          Text(label, maxLines: 1, overflow: TextOverflow.ellipsis),
           subtitle: Text(isLocal ? 'You' : (speaking ? 'Speaking' : '')),
-          trailing: speaking ? const Icon(Icons.volume_up, size: 18) : null,
+          trailing:
+          speaking ? const Icon(Icons.volume_up, size: 18) : null,
         );
       },
     );
@@ -545,7 +586,8 @@ class _ErrorView extends StatelessWidget {
         child: Column(
           mainAxisSize: MainAxisSize.min,
           children: [
-            const Icon(Icons.warning_amber_rounded, size: 42, color: Colors.amber),
+            const Icon(Icons.warning_amber_rounded,
+                size: 42, color: Colors.amber),
             const SizedBox(height: 12),
             Text(
               error,
