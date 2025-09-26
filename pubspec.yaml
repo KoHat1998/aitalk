@@ -36,13 +36,12 @@ dependencies:
   flutter_file_dialog: ^3.0.2
   video_thumbnail: ^0.5.3
   video_player: any
-
-
   percent_indicator: ^4.0.0
-
-
   open_filex: ^4.5.0
 
+  firebase_core: ^3.6.0
+  firebase_messaging: ^15.1.2
+  flutter_local_notifications: ^17.2.3
 
 
 
