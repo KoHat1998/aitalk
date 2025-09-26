@@ -1,10 +1,14 @@
-
 import 'package:flutter/material.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
+
+// Assuming these models and screens exist in these locations:
 import '../../models/user_post.dart';
-import '../../utils/storage_utils.dart';
-import 'create_post.dart';
-import 'edit_post_screen.dart';
+import '../../models/stories_model.dart'; // Import your story models
+import '../../utils/storage_utils.dart'; // For extractPathFromUrl
+import './create_post.dart'; // Your CreatePostScreen
+import './edit_post_screen.dart';   // Your EditPostScreen
+import './create_story_screen.dart'; // Placeholder for your CreateStoryScreen
+import './story_view_screen.dart';   // Placeholder for your StoryViewScreen
 
 class NewsScreen extends StatefulWidget {
   const NewsScreen({super.key});
@@ -16,39 +20,54 @@ class NewsScreen extends StatefulWidget {
 class _NewsScreenState extends State<NewsScreen> {
   final _supabase = Supabase.instance.client;
   List<UserPost> _posts = [];
-  bool _isLoading = true;
-  String? _errorMessage;
+  bool _isLoadingPosts = true; // Renamed for clarity
+  String? _postErrorMessage;  // Renamed for clarity
 
-  String? get currentUserId {
-    return null; // Or your test user ID
-  }
+  List<UserStoryGroup> _storyGroups = [];
+  bool _isLoadingStories = true;
+  String? _storyErrorMessage;
 
+  // No need for the currentUserId getter if not directly used in this file's logic
+  // final String? currentAuthUserId = _supabase.auth.currentUser?.id; // Can be fetched when needed
 
   @override
   void initState() {
     super.initState();
-    _fetchPosts();
+    _loadInitialFeedData();
+  }
+
+  Future<void> _loadInitialFeedData() async {
+    // Set combined loading state if you want a single initial loader
+    if (mounted) {
+      setState(() {
+        _isLoadingPosts = true;
+        _isLoadingStories = true;
+      });
+    }
+    await Future.wait([
+      _fetchPosts(),
+      _fetchAndGroupStories(),
+    ]);
   }
 
   Future<void> _fetchPosts() async {
     if (!mounted) return;
-    setState(() {
-      _isLoading = true;
-      _errorMessage = null;
-    });
+    // No need to set _isLoadingPosts = true here if _loadInitialFeedData does it
+    // Or if this is called independently for refresh, then yes:
+    if (!_isLoadingPosts) setState(() => _isLoadingPosts = true);
+    setState(() => _postErrorMessage = null);
+
 
     try {
       final currentAuthUserId = _supabase.auth.currentUser?.id;
-
-      // Call the RPC function
       final response = await _supabase.rpc(
         'get_posts_with_reaction_details',
-        params: {'requesting_user_id': currentAuthUserId}, // Pass null if user not logged in
+        params: {'requesting_user_id': currentAuthUserId},
       );
 
       if (!mounted) return;
 
-      if (response is List) { // RPC returns a list of records
+      if (response is List) {
         _posts = response.map((item) {
           return UserPost(
             id: item['id'] as String,
@@ -58,54 +77,129 @@ class _NewsScreenState extends State<NewsScreen> {
             createdAt: DateTime.parse(item['created_at'] as String),
             userDisplayName: item['author_display_name'] as String?,
             userAvatarUrl: item['author_avatar_url'] as String?,
-            likeCount: (item['like_count'] as num?)?.toInt() ?? 0, // Ensure num to int conversion
+            likeCount: (item['like_count'] as num?)?.toInt() ?? 0,
             currentUserHasLiked: item['current_user_has_liked'] as bool? ?? false,
           );
         }).toList();
       } else {
-        _errorMessage = "Unexpected data format from server.";
+        _postErrorMessage = "Unexpected data format for posts.";
         print('Supabase RPC unexpected response type: ${response.runtimeType}');
       }
-
     } on PostgrestException catch (e) {
       if (!mounted) return;
-      _errorMessage = "Data Fetch Error: ${e.message} (Code: ${e.code})";
-      print('Supabase fetch error: ${e.toString()}');
+      _postErrorMessage = "Post Fetch Error: ${e.message}";
+      print('Supabase post fetch error: ${e.toString()}');
     } catch (e) {
       if (!mounted) return;
-      _errorMessage = "An unexpected error occurred: $e";
-      print('Generic fetch error: ${e.toString()}');
+      _postErrorMessage = "An unexpected error occurred fetching posts: $e";
+      print('Generic post fetch error: ${e.toString()}');
     } finally {
       if (mounted) {
         setState(() {
-          _isLoading = false;
+          _isLoadingPosts = false;
+        });
+      }
+    }
+  }
+
+  Future<void> _fetchAndGroupStories() async {
+    if (!mounted) return;
+    // No need to set _isLoadingStories = true here if _loadInitialFeedData does it
+    // Or if this is called independently for refresh, then yes:
+    if (!_isLoadingStories) setState(() => _isLoadingStories = true);
+    setState(() => _storyErrorMessage = null);
+
+    try {
+      final response = await _supabase
+          .from('stories')
+          .select('''
+            id, user_id, media_url, media_type, caption, created_at,
+            user:user_id (id, display_name, avatar_url)
+          ''')
+          .order('user_id', ascending: true)
+          .order('created_at', ascending: true);
+
+      if (!mounted) return; // Check after await
+
+      final List<dynamic> data = response as List<dynamic>;
+      if (data.isEmpty) {
+        if (mounted) {
+          setState(() {
+            _storyGroups = [];
+          });
+        }
+      } else {
+        final Map<String, UserStoryGroup> tempGroups = {};
+        for (var storyData in data) {
+          final Map<String, dynamic> storyMap = storyData as Map<String, dynamic>;
+          final String userId = storyMap['user_id'] as String;
+          final Map<String, dynamic>? userData = storyMap['user'] as Map<String, dynamic>?;
+
+          if (!tempGroups.containsKey(userId)) {
+            tempGroups[userId] = UserStoryGroup(
+              userId: userId,
+              userName: userData?['display_name'] as String? ?? 'User',
+              userAvatarUrl: userData?['avatar_url'] as String?,
+              stories: [],
+            );
+          }
+          tempGroups[userId]!.stories.add(StoryItem.fromMap(storyMap));
+        }
+        if (mounted) {
+          setState(() {
+            _storyGroups = tempGroups.values.toList();
+          });
+        }
+      }
+    } on PostgrestException catch (e) {
+      if (!mounted) return;
+      _storyErrorMessage = "Story Fetch Error: ${e.message}";
+      print('Supabase story fetch error: ${e.toString()}');
+    } catch (e) {
+      if (!mounted) return;
+      _storyErrorMessage = "An unexpected error occurred fetching stories: $e";
+      print('Generic story fetch error: ${e.toString()}');
+    } finally {
+      if (mounted) {
+        setState(() {
+          _isLoadingStories = false;
         });
       }
     }
   }
 
   void _navigateToCreatePost() async {
-    // Before navigating, ensure you know who the current user is.
-    // For this simplified example, we'll pass a placeholder or handle it in CreatePostScreen.
     final result = await Navigator.push(
       context,
-      MaterialPageRoute(builder: (context) => CreatePostScreen()),
+      MaterialPageRoute(builder: (context) => const CreatePostScreen()),
     );
-
-    // If a post was successfully created (result == true), refresh the feed.
     if (result == true && mounted) {
       _fetchPosts();
     }
   }
 
+  void _navigateToAddStoryScreen() async {
+    final result = await Navigator.push(
+      context,
+      MaterialPageRoute(builder: (context) => const CreateStoryScreen()), // Ensure this screen exists
+    );
+    if (result == true && mounted) {
+      _fetchAndGroupStories();
+    }
+  }
+
   Future<void> _toggleLike(UserPost postToUpdate) async {
-    if (_supabase.auth.currentUser == null) {
-      ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(content: Text('You must be logged in to like posts')));
+    final currentUser = _supabase.auth.currentUser;
+    if (currentUser == null) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('You must be logged in to like posts')),
+        );
+      }
       return;
     }
 
-    final currentUserId = _supabase.auth.currentUser!.id;
+    final currentUserId = currentUser.id;
     final wasLiked = postToUpdate.currentUserHasLiked;
     final newLikeCount = wasLiked ? postToUpdate.likeCount - 1 : postToUpdate.likeCount + 1;
 
@@ -115,44 +209,37 @@ class _NewsScreenState extends State<NewsScreen> {
       setState(() {
         _posts[postIndex] = _posts[postIndex].copyWith(
           currentUserHasLiked: !wasLiked,
-          likeCount: newLikeCount < 0 ? 0 : newLikeCount, // Ensure count doesn't go below 0
+          likeCount: newLikeCount < 0 ? 0 : newLikeCount,
         );
       });
     }
 
     try {
       if (wasLiked) {
-        // User is unliking the post
         await _supabase
             .from('post_reactions')
             .delete()
             .match({'post_id': postToUpdate.id, 'user_id': currentUserId, 'reaction_type': 'like'});
       } else {
-        // User is liking the post
         await _supabase.from('post_reactions').insert({
           'post_id': postToUpdate.id,
           'user_id': currentUserId,
-          'reaction_type': 'like', // Explicitly set if not relying on default
+          'reaction_type': 'like',
         });
       }
-      // Optional: You might want to re-fetch the specific post's accurate data
-      // or trust the optimistic update for now and let the next full _fetchPosts correct it.
-      // For simplicity, we'll rely on the next full refresh or optimistic update for now.
-
     } catch (e) {
-      // Revert optimistic update on error
-      if (postIndex != -1) {
-        if (!mounted) return;
+      if (postIndex != -1 && mounted) {
         setState(() {
           _posts[postIndex] = _posts[postIndex].copyWith(
-            currentUserHasLiked: wasLiked, // Revert to original liked state
-            likeCount: postToUpdate.likeCount, // Revert to original like count
+            currentUserHasLiked: wasLiked,
+            likeCount: postToUpdate.likeCount,
           );
         });
       }
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
-            SnackBar(content: Text('Error processing like: ${e.toString()}')));
+          SnackBar(content: Text('Error processing like: ${e.toString()}')),
+        );
       }
       print("Error toggling like: $e");
     }
@@ -177,7 +264,7 @@ class _NewsScreenState extends State<NewsScreen> {
                       ? NetworkImage(post.userAvatarUrl!)
                       : null,
                   child: post.userAvatarUrl == null || post.userAvatarUrl!.isEmpty
-                      ? Text(post.userDisplayName?.substring(0, 1).toUpperCase() ?? 'U')
+                      ? Text(post.userDisplayName?.isNotEmpty == true ? post.userDisplayName![0].toUpperCase() : 'U')
                       : null,
                 ),
                 const SizedBox(width: 10),
@@ -189,48 +276,43 @@ class _NewsScreenState extends State<NewsScreen> {
                 ),
                 if (isAuthor)
                   PopupMenuButton<String>(
-                      icon: const Icon(Icons.more_vert),
-                      onSelected: (value){
-                        if (value == 'edit') {
-                          _navigateToEditPost(post);
-                        }else if (value == 'delete'){
-                          _confirmDeletePost(post);
-                        }
-                      },
-                      itemBuilder: (BuildContext context) => <PopupMenuEntry<String>>[
-                        const PopupMenuItem<String>(
-                            value: 'edit',
-                            child: ListTile(leading: Icon(Icons.edit), title: Text('Edit')),
-                        ),
-                        const PopupMenuItem<String>(
-                          value: 'delete',
-                          child: ListTile(leading: Icon(Icons.delete), title: Text('Delete')),
-                        ),
-                      ],
+                    icon: const Icon(Icons.more_vert),
+                    onSelected: (value) {
+                      if (value == 'edit') {
+                        _navigateToEditPost(post);
+                      } else if (value == 'delete') {
+                        _confirmDeletePost(post);
+                      }
+                    },
+                    itemBuilder: (BuildContext context) => <PopupMenuEntry<String>>[
+                      const PopupMenuItem<String>(
+                        value: 'edit',
+                        child: ListTile(leading: Icon(Icons.edit), title: Text('Edit')),
+                      ),
+                      const PopupMenuItem<String>(
+                        value: 'delete',
+                        child: ListTile(leading: Icon(Icons.delete), title: Text('Delete')),
+                      ),
+                    ],
                   ),
               ],
             ),
             const SizedBox(height: 12),
             if (post.content != null && post.content!.isNotEmpty)
               Padding(
-                padding: const EdgeInsets.only(bottom: 8.0), // Add some space if image follows
-                child: Text(
-                  post.content!,
-                  style: const TextStyle(fontSize: 15),
-                ),
+                padding: const EdgeInsets.only(bottom: 8.0),
+                child: Text(post.content!, style: const TextStyle(fontSize: 15)),
               ),
-
-            // --- Display Image ---
             if (post.imageUrl != null && post.imageUrl!.isNotEmpty)
               Padding(
                 padding: const EdgeInsets.symmetric(vertical: 8.0),
-                child: ClipRRect( // To give rounded corners to the image
+                child: ClipRRect(
                   borderRadius: BorderRadius.circular(8.0),
                   child: Image.network(
                     post.imageUrl!,
                     width: double.infinity,
-                    fit: BoxFit.cover, // Or BoxFit.contain, depending on desired look
-                    loadingBuilder: (BuildContext context, Widget child, ImageChunkEvent? loadingProgress) {
+                    fit: BoxFit.cover,
+                    loadingBuilder: (context, child, loadingProgress) {
                       if (loadingProgress == null) return child;
                       return Center(
                         child: Padding(
@@ -243,9 +325,9 @@ class _NewsScreenState extends State<NewsScreen> {
                         ),
                       );
                     },
-                    errorBuilder: (BuildContext context, Object exception, StackTrace? stackTrace) {
+                    errorBuilder: (context, exception, stackTrace) {
                       return Container(
-                        height: 150, // Give some height to the error placeholder
+                        height: 150,
                         color: Colors.grey[200],
                         child: const Center(child: Icon(Icons.broken_image, color: Colors.grey, size: 50)),
                       );
@@ -253,44 +335,39 @@ class _NewsScreenState extends State<NewsScreen> {
                   ),
                 ),
               ),
-            // --- End Display Image ---
-
             const SizedBox(height: 10),
             Text(
               'Posted: ${post.createdAt.toLocal().toString().substring(0, 16)}',
               style: Theme.of(context).textTheme.bodySmall?.copyWith(color: Colors.grey[600]),
             ),
-
             const SizedBox(height: 8),
-            Divider(),
+            const Divider(),
             Padding(
-                padding: const EdgeInsets.symmetric(vertical: 4.0),
-                child: Row(
-                  mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                  children: [
-                    TextButton.icon(
-                        icon: Icon(
-                          post.currentUserHasLiked ? Icons.favorite : Icons.favorite_border,
-                          color: post.currentUserHasLiked ? Colors.red : null,
-                          size: 20,
-                        ),
-                        label: Text(
-                          'Like',
-                          style: TextStyle(
-                            color: post.currentUserHasLiked ? Colors.red : null,
-                            ),
-                          ),
-                        onPressed: () {
-                           _toggleLike(post);
-                        },
+              padding: const EdgeInsets.symmetric(vertical: 4.0),
+              child: Row(
+                mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                children: [
+                  TextButton.icon(
+                    icon: Icon(
+                      post.currentUserHasLiked ? Icons.favorite : Icons.favorite_border,
+                      color: post.currentUserHasLiked ? Colors.red : Theme.of(context).iconTheme.color,
+                      size: 20,
                     ),
-                    if (post.likeCount > 0)
-                      Text(
-                        '${post.likeCount} ${post.likeCount == 1 ? "like" : "likes"}',
-                        style: TextStyle(color: Colors.grey[700], fontSize: 14),
+                    label: Text(
+                      'Like',
+                      style: TextStyle(
+                        color: post.currentUserHasLiked ? Colors.red : Theme.of(context).textTheme.labelLarge?.color,
                       ),
-                  ],
-                ),
+                    ),
+                    onPressed: () => _toggleLike(post),
+                  ),
+                  if (post.likeCount > 0)
+                    Text(
+                      '${post.likeCount} ${post.likeCount == 1 ? "like" : "likes"}',
+                      style: TextStyle(color: Colors.grey[700], fontSize: 14),
+                    ),
+                ],
+              ),
             ),
           ],
         ),
@@ -301,123 +378,256 @@ class _NewsScreenState extends State<NewsScreen> {
   void _navigateToEditPost(UserPost post) {
     Navigator.push(
       context,
-      MaterialPageRoute(
-          builder: (context) => EditPostScreen(postToEdit: post),
-      ),
+      MaterialPageRoute(builder: (context) => EditPostScreen(postToEdit: post)),
     ).then((result) {
-      if (result == true && mounted){
+      if (result == true && mounted) {
         _fetchPosts();
       }
     });
   }
 
   Future<void> _confirmDeletePost(UserPost post) async {
-    final confirm = await showDialog<bool>(context: context, builder: (BuildContext context) {
-      return AlertDialog(
-        title: const Text('Confirm Deletion'),
-        content: const Text('Are you sure you want to delete this post?'),
-        actions: <Widget>[
-          TextButton(
-            child: const Text('Cancel'),
-            onPressed: (){
-              Navigator.pop(context, false);
-            },
-          ),
-          TextButton(
-            style: TextButton.styleFrom(foregroundColor: Colors.red),
-            child: const Text('Delete'),
-            onPressed: (){
-              Navigator.pop(context, true);
-            },
-          ),
-        ],
-      );
-    });
+    final confirm = await showDialog<bool>(
+      context: context,
+      builder: (BuildContext context) {
+        return AlertDialog(
+          title: const Text('Confirm Deletion'),
+          content: const Text('Are you sure you want to delete this post?'),
+          actions: <Widget>[
+            TextButton(
+              child: const Text('Cancel'),
+              onPressed: () => Navigator.pop(context, false),
+            ),
+            TextButton(
+              style: TextButton.styleFrom(foregroundColor: Colors.red),
+              child: const Text('Delete'),
+              onPressed: () => Navigator.pop(context, true),
+            ),
+          ],
+        );
+      },
+    );
 
-    if (confirm == true && mounted) {
-      setState(() {
-        _isLoading = true;
-      });
-      try {
-        if (post.imageUrl != null && post.imageUrl!.isNotEmpty) {
-          final imagePath = extractPathFromUrl(post.imageUrl!);
-          if (imagePath != null) {
-            try {
-              await _supabase.storage.from('post_images').remove([imagePath]);
-            } catch (storageError){
-              print('Error removing image from storage: $storageError(Continuing with post deletion)');
-            }
+    if (confirm != true || !mounted) return;
+
+    // Show loading indicator specifically for delete operation
+    // For simplicity, we are using the global _isLoadingPosts,
+    // but a dedicated _isDeletingPost would be better for granular UI.
+    setState(() => _isLoadingPosts = true);
+
+    try {
+      if (post.imageUrl != null && post.imageUrl!.isNotEmpty) {
+        final imagePath = extractPathFromUrl(post.imageUrl!); // Ensure extractPathFromUrl is robust
+        if (imagePath != null && imagePath.isNotEmpty) {
+          try {
+            await _supabase.storage.from('post_images').remove([imagePath]);
+          } catch (storageError) {
+            print('Error removing image from storage: $storageError (Continuing with post deletion)');
+            // Optionally show a non-fatal warning to the user
           }
         }
-        await _supabase.from('posts').delete().eq('id', post.id);
-
-        if (mounted) {
-          _fetchPosts();
-          ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Post deleted')));
-        }
-      } on PostgrestException catch (e){
-        if (mounted) {
-          ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('DB Error deleting post: ${e.message}')));
-        }
-      } catch (e) {
-        if (mounted) {
-          ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('Error deleting post: $e')));
-        }
-      } finally {
-        if (mounted && _isLoading){
-          setState(() {
-            _isLoading = false;
-          });
-        }
       }
+      await _supabase.from('posts').delete().eq('id', post.id);
+
+      if (mounted) {
+        // _fetchPosts(); // This will reset loading state
+        // Optimistic UI update: Remove post locally then fetch
+        _posts.removeWhere((p) => p.id == post.id);
+        ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Post deleted')));
+        // If _posts becomes empty, the UI will show "No posts yet".
+        // No need to call _fetchPosts() immediately if you want faster perceived deletion,
+        // but the list will be fully accurate on next refresh/re-fetch.
+        // For this example, let's keep the fetch for consistency.
+        _fetchPosts(); // This will re-fetch and also set _isLoadingPosts = false
+      }
+    } on PostgrestException catch (e) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('DB Error deleting post: ${e.message}')));
+      }
+    } catch (e) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('Error deleting post: $e')));
+      }
+    } finally {
+      // _fetchPosts() will handle setting _isLoadingPosts to false
+      // If you didn't call _fetchPosts() above, you'd do:
+      // if (mounted && _isLoadingPosts) {
+      //   setState(() => _isLoadingPosts = false);
+      // }
     }
   }
-
 
   @override
   Widget build(BuildContext context) {
     return Scaffold(
       appBar: AppBar(
         title: const Text("User Feed"),
-      ),
-      body: _isLoading
-          ? const Center(child: CircularProgressIndicator())
-          : _errorMessage != null
-          ? Center(
-        child: Padding(
-          padding: const EdgeInsets.all(16.0),
-          child: Column(
-            mainAxisAlignment: MainAxisAlignment.center,
-            children: [
-              Text(_errorMessage!, textAlign: TextAlign.center, style: TextStyle(color: Colors.red[700], fontSize: 16)),
-              const SizedBox(height: 20),
-              ElevatedButton(onPressed: _fetchPosts, child: const Text('Try Again'))
-            ],
+        actions: [
+          IconButton(
+            icon: const Icon(Icons.add_circle_outline),
+            tooltip: 'Add Story',
+            onPressed: _navigateToAddStoryScreen,
           ),
-        ),
-      )
-          : _posts.isEmpty
-          ? const Center(
-        child: Text(
-          'No posts yet. Be the first to share something!',
-          style: TextStyle(fontSize: 16, color: Colors.grey),
-          textAlign: TextAlign.center,
-        ),
-      )
-          : RefreshIndicator(
-        onRefresh: _fetchPosts,
-        child: ListView.builder(
-          itemCount: _posts.length,
-          itemBuilder: (context, index) {
-            final post = _posts[index];
-            return _buildPostItem(post);
-          },
-        ),
+        ],
       ),
+      body: (_isLoadingPosts && _posts.isEmpty && _isLoadingStories && _storyGroups.isEmpty)
+          ? const Center(child: CircularProgressIndicator())
+          : _buildFeedContent(),
       floatingActionButton: FloatingActionButton(
         onPressed: _navigateToCreatePost,
         tooltip: 'Create Post',
         child: const Icon(Icons.add_comment_outlined),
+      ),
+    );
+  }
+
+  Widget _buildFeedContent() {
+    return RefreshIndicator(
+      onRefresh: _loadInitialFeedData,
+      child: CustomScrollView(
+        slivers: <Widget>[
+          SliverToBoxAdapter(
+            child: _buildStorySection(),
+          ),
+          _buildPostsListSliver(),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildStorySection() {
+    if (_isLoadingStories && _storyGroups.isEmpty) {
+      return const Padding(
+        padding: EdgeInsets.symmetric(vertical: 16.0),
+        child: Center(child: CircularProgressIndicator(strokeWidth: 2.0)),
+      );
+    }
+    if (_storyErrorMessage != null) {
+      return Padding(
+        padding: const EdgeInsets.all(16.0),
+        child: Column(
+            mainAxisAlignment: MainAxisAlignment.center,
+            crossAxisAlignment: CrossAxisAlignment.center,
+            children: [
+              Text(_storyErrorMessage!, style: TextStyle(color: Colors.orange[700]), textAlign: TextAlign.center),
+              const SizedBox(height: 8),
+              ElevatedButton(onPressed: _fetchAndGroupStories, child: const Text('Retry Stories'))
+            ]
+        ),
+      );
+    }
+    if (_storyGroups.isEmpty && !_isLoadingStories) {
+      return const Padding(
+        padding: EdgeInsets.symmetric(vertical: 16.0, horizontal: 16.0),
+        child: Text(
+          'No stories yet. Tap the + in the top right to share yours!',
+          textAlign: TextAlign.center,
+          style: TextStyle(color: Colors.grey),
+        ),
+      );
+    }
+    return _buildStoryRingsWidget();
+  }
+
+  Widget _buildStoryRingsWidget() {
+    return SizedBox(
+      height: 110,
+      child: ListView.builder(
+        padding: const EdgeInsets.symmetric(vertical: 8.0, horizontal: 8.0),
+        scrollDirection: Axis.horizontal,
+        // No "Add Story" button here, it's in the AppBar
+        itemCount: _storyGroups.length,
+        itemBuilder: (context, index) {
+          final group = _storyGroups[index];
+          return Padding(
+            padding: const EdgeInsets.symmetric(horizontal: 4.0),
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                GestureDetector(
+                  onTap: () {
+                    Navigator.push(
+                      context,
+                      MaterialPageRoute(
+                        builder: (_) => StoryViewScreen(storyGroups: _storyGroups, initialGroupIndex: index),
+                      ),
+                    );
+                  },
+                  child: CircleAvatar(
+                    radius: 30,
+                    backgroundImage: group.userAvatarUrl != null && group.userAvatarUrl!.isNotEmpty
+                        ? NetworkImage(group.userAvatarUrl!)
+                        : null,
+                    child: (group.userAvatarUrl == null || group.userAvatarUrl!.isEmpty)
+                        ? Text(group.userName.isNotEmpty ? group.userName[0].toUpperCase() : "U")
+                        : null,
+                  ),
+                ),
+                const SizedBox(height: 4),
+                SizedBox( // Added SizedBox to constrain width of username text
+                  width: 60, // Match CircleAvatar diameter
+                  child: Text(
+                    group.userName,
+                    style: const TextStyle(fontSize: 12),
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                    textAlign: TextAlign.center,
+                  ),
+                ),
+              ],
+            ),
+          );
+        },
+      ),
+    );
+  }
+
+  Widget _buildPostsListSliver() {
+    if (_isLoadingPosts && _posts.isEmpty) {
+      return const SliverFillRemaining(
+        child: Center(child: CircularProgressIndicator()),
+      );
+    }
+    if (_postErrorMessage != null && _posts.isEmpty) {
+      return SliverFillRemaining(child: _buildErrorWidget(_postErrorMessage!, _fetchPosts));
+    }
+    if (_posts.isEmpty && !_isLoadingPosts) {
+      return const SliverFillRemaining(
+        child: Center(
+          child: Padding( // Added padding for better visual
+            padding: EdgeInsets.all(16.0),
+            child: Text(
+              'No posts from your contacts yet. Posts from users you are connected with will appear here.',
+              style: TextStyle(fontSize: 16, color: Colors.grey),
+              textAlign: TextAlign.center,
+            ),
+          ),
+        ),
+      );
+    }
+    return SliverList(
+      delegate: SliverChildBuilderDelegate(
+            (BuildContext context, int index) {
+          final post = _posts[index];
+          return _buildPostItem(post);
+        },
+        childCount: _posts.length,
+      ),
+    );
+  }
+
+  Widget _buildErrorWidget(String message, VoidCallback onRetry) {
+    return Center(
+      child: Padding(
+        padding: const EdgeInsets.all(16.0),
+        child: Column(
+          mainAxisAlignment: MainAxisAlignment.center,
+          children: [
+            Text(message, textAlign: TextAlign.center, style: TextStyle(color: Colors.red[700], fontSize: 16)),
+            const SizedBox(height: 20),
+            ElevatedButton(onPressed: onRetry, child: const Text('Try Again'))
+          ],
+        ),
       ),
     );
   }

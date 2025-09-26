@@ -38,6 +38,7 @@ dependencies:
   video_player: any
 
 
+  percent_indicator: ^4.0.0
 
 
   open_filex: ^4.5.0
