@@ -32,10 +32,14 @@ class _ChatsScreenState extends State<ChatsScreen> {
   // Test unit id (ok to ship while testing)
   final String _bannerAdUnitId = 'ca-app-pub-3940256099942544/6300978111';
 
+  Set<String> _blockedByUserIds = {}; // IDs of users the current user has blocked
+  String? get _myUserId => Supabase.instance.client.auth.currentUser?.id;
+
   @override
   void initState() {
     super.initState();
-    _load();
+    //_load();
+    _loadAllChatData();
     _loadBannerAd();
   }
 
@@ -61,8 +65,56 @@ class _ChatsScreenState extends State<ChatsScreen> {
     )..load();
   }
 
-  Future<void> _load() async {
+  Future<void> _loadAllChatData() async {
+    if (!mounted) return;
     setState(() => _loading = true);
+    try {
+      await _fetchBlockedUserIds(); // << FETCH BLOCKED USERS FIRST
+      await _loadThreadsAndPreviews(); // Your existing method to load threads and compute previews
+    } catch (e) {
+      // Handle errors
+      if (!mounted) return;
+      _snack('Failed to load chat data: $e');
+    } finally {
+      if (mounted) setState(() => _loading = false);
+    }
+  }
+
+  Future<void> _fetchBlockedUserIds() async {
+    final currentUserId = _myUserId;
+    if (currentUserId == null) {
+      _blockedByUserIds = {};
+      return;
+    }
+    try {
+      final response = await _sb
+          .from('user_blocks') // Your blocks table name
+          .select('blocked_user_id')
+          .eq('blocker_user_id', currentUserId);
+
+      if (mounted) {
+        final ids = (response as List?)
+            ?.map((item) => item['blocked_user_id'] as String)
+            .where((id) => id.isNotEmpty) // Ensure no empty strings if possible
+            .toSet();
+        setState(() {
+          _blockedByUserIds = ids ?? {};
+        });
+        print("DEBUG: ChatsScreen - Blocked User IDs: $_blockedByUserIds");
+      }
+    } catch (e) {
+      if (mounted) {
+        setState(() {
+          _blockedByUserIds = {}; // Reset on error
+        });
+        print("Error fetching blocked user IDs: $e");
+        // Optionally show a snackbar, but maybe fail silently for this background fetch
+      }
+    }
+  }
+
+  Future<void> _loadThreadsAndPreviews() async {
+    //setState(() => _loading = true);
     try {
       // 1) server-side list (expects columns from the updated list_threads())
       final res = await _sb.rpc('list_threads');
@@ -82,9 +134,9 @@ class _ChatsScreenState extends State<ChatsScreen> {
     } catch (e) {
       if (!mounted) return;
       _snack('Failed to load chats: $e');
-    } finally {
-      if (mounted) setState(() => _loading = false);
-    }
+    } //finally {
+      //if (mounted) setState(() => _loading = false);
+    //}
   }
 
   Future<void> _loadCutoffs() async {
@@ -123,7 +175,17 @@ class _ChatsScreenState extends State<ChatsScreen> {
 
     for (final row in _items) {
       final tid = (row['thread_id'] as String?) ?? row['thread_id'].toString();
-      String preview = 'Say hi 👋';
+      final isGroup = row['is_group'] == true;
+      final peerId = row['peer_id'] as String?;
+      String defaultpreview = 'Say hi 👋';
+      String finalPreview;
+
+      //Block check
+      if (!isGroup && peerId != null && _blockedByUserIds.contains(peerId)) {
+        finalPreview = 'You blocked this user'; // Or "Interaction disabled"
+        _previews[tid] = finalPreview;
+        continue; // Skip fetching messages for preview if blocked
+      }
 
       try {
         final cutoff = _cutoffs[tid];
@@ -142,7 +204,7 @@ class _ChatsScreenState extends State<ChatsScreen> {
         final list = (msgs as List).cast<Map>();
 
         if (list.isEmpty) {
-          _previews[tid] = (row['last_message'] as String?) ?? preview;
+          _previews[tid] = (row['last_message'] as String?) ?? defaultpreview;
           continue;
         }
 
@@ -161,6 +223,17 @@ class _ChatsScreenState extends State<ChatsScreen> {
           final mid = m['id'] as String;
           if (hiddenSet.contains(mid)) continue;
 
+          final messageSenderId = m['sender_id'] as String?;
+          if (!isGroup && peerId != null && _blockedByUserIds.contains(peerId) && messageSenderId == peerId) {
+            // If we are here, it means the top-level block check didn't catch it,
+            // which implies _blockedByUserIds might have updated.
+            // We should use the "You blocked this user" message.
+            // However, the `continue` above should prevent this inner loop mostly.
+            // For safety, let's keep a simpler preview if a blocked user's message is somehow processed here.
+            chosen = 'Interaction disabled'; // Or some other generic message
+            break;
+          }
+
           final isDeleted =
               m['deleted_at'] != null || (m['kind'] as String?) == 'deleted';
           if (isDeleted) {
@@ -175,9 +248,9 @@ class _ChatsScreenState extends State<ChatsScreen> {
           }
         }
 
-        _previews[tid] = chosen ?? (row['last_message'] as String?) ?? preview;
+        _previews[tid] = chosen ?? (row['last_message'] as String?) ?? defaultpreview;
       } catch (_) {
-        _previews[tid] = (row['last_message'] as String?) ?? 'Say hi 👋';
+        _previews[tid] = (row['last_message'] as String?) ?? defaultpreview;
       }
     }
   }
@@ -186,6 +259,7 @@ class _ChatsScreenState extends State<ChatsScreen> {
     final threadId = (row['thread_id'] as String?) ?? row['thread_id'].toString();
     final title = _titleFor(row);
     final isGroup = row['is_group'] == true;
+    final peerId = row['peer_id'] as String?;
 
     await Navigator.pushNamed(
       context,
@@ -194,9 +268,10 @@ class _ChatsScreenState extends State<ChatsScreen> {
         threadId: threadId,
         title: title,
         isGroup: isGroup,
+        peerId: peerId,
       ),
     );
-    if (mounted) _load(); // refresh after returning
+    if (mounted) _loadThreadsAndPreviews(); // refresh after returning
   }
 
   // ===== confirm dialog =====
@@ -279,7 +354,7 @@ class _ChatsScreenState extends State<ChatsScreen> {
       );
     } else {
       chatBody = RefreshIndicator(
-        onRefresh: _load,
+        onRefresh: _loadThreadsAndPreviews,
         child: ListView.separated(
           padding: const EdgeInsets.all(16),
           itemCount: _items.length,
@@ -288,18 +363,46 @@ class _ChatsScreenState extends State<ChatsScreen> {
             final row = _items[i];
             final title = _titleFor(row);
             final tid = (row['thread_id'] as String?) ?? row['thread_id'].toString();
-            final subtitle =
-                _previews[tid] ?? (row['last_message'] as String?) ?? 'Say hi 👋';
+            final isGroup = row['is_group'] == true;
+            final peerId = row['peer_id'] as String?;
+
+            bool isPeerChatBlocked = false;
+            if (!isGroup && peerId != null && _blockedByUserIds.contains(peerId)) {
+              isPeerChatBlocked = true;
+            }
+
+            String subtitle;
+            if (isPeerChatBlocked) {
+              subtitle = 'You blocked this user';
+            } else {
+              subtitle = _previews[tid] ?? (row['last_message'] as String?) ?? 'Say hi 👋';
+            }
 
             final tile = Card(
+              color: isPeerChatBlocked ? Colors.grey.shade300 : null,
               child: ListTile(
                 leading: Avatar(
                   name: title,
                   // If your Avatar supports a url prop, you can pass:
                   // url: row['item_avatar_url'] as String?,
                 ),
-                title: Text(title, maxLines: 1, overflow: TextOverflow.ellipsis),
-                subtitle: Text(subtitle, maxLines: 1, overflow: TextOverflow.ellipsis),
+                title: Text(
+                  title,
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                  style: TextStyle(
+                    color: isPeerChatBlocked ? Colors.grey.shade600 : null,
+                  ),
+                ),
+                subtitle: Text(
+                    subtitle,
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                    style: TextStyle(
+                      fontStyle: isPeerChatBlocked ? FontStyle.italic : FontStyle.normal,
+                      color: isPeerChatBlocked ? Colors.grey.shade700 : null,
+                    ),
+                ),
                 onTap: () => _openThread(row),
                 trailing: PopupMenuButton<String>(
                   onSelected: (v) {

@@ -1,5 +1,6 @@
 import 'package:flutter/material.dart';
 
+import '../ui/screens/blocked_users_screen.dart';
 import '../ui/screens/splash_screen.dart';
 import '../ui/screens/sign_in_screen.dart';
 import '../ui/screens/sign_up_screen.dart';
@@ -43,6 +44,7 @@ class AppRoutes {
   static const addContact = '/add-contact';
   static const myCode = '/my-code';
   static const scanQr = '/scan-qr';
+  static const blockedUsers = '/blocked-users';
 
   static const editProfile = '/edit-profile';
 
@@ -121,6 +123,8 @@ class AppRoutes {
         return MaterialPageRoute(builder: (_) => IncomingCallScreen(args: args));
       }
 
+      case blockedUsers:
+        return MaterialPageRoute(builder: (_) => const BlockedUsersScreen());
     // Contacts / codes / QR
       case addContact:
         return MaterialPageRoute(builder: (_) => const AddContactScreen());

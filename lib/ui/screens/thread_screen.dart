@@ -27,10 +27,13 @@ import 'image_viewer_screen.dart';
 class ThreadArgs {
   final String threadId;
   final String title;
+  final String? peerId;
   final bool isGroup;
+
   const ThreadArgs({
     required this.threadId,
     required this.title,
+    this.peerId,
     this.isGroup = false,
   });
 }
@@ -48,6 +51,7 @@ class _ThreadScreenState extends State<ThreadScreen> {
 
   late final String _tid;
   late String _title; // mutable (rename group)
+  late final String? _peerId;
 
   final _scroll = ScrollController();
 
@@ -68,6 +72,8 @@ class _ThreadScreenState extends State<ThreadScreen> {
   final Map<String, CancelToken> _dlCancels = {};
 
   static const String _storageBucket = 'chat_uploads';
+  bool _isPeerBlockedByMe = false;
+  bool _amIBlockedByPeer = false;
   String? get _myId => _sb.auth.currentUser?.id;
   bool get _isGroup => widget.args.isGroup;
 
@@ -76,7 +82,17 @@ class _ThreadScreenState extends State<ThreadScreen> {
     super.initState();
     _tid = widget.args.threadId;
     _title = widget.args.title;
-    _load();
+    _peerId = widget.args.peerId;
+
+    _loadInitialScreenData();
+  }
+
+  Future<void> _loadInitialScreenData() async{
+    // Set loading true for the whole screen if needed
+    if (!widget.args.isGroup && _peerId != null) {
+      await _checkInitialBlockStatus(); // Wait for block status
+    }
+    await _load(); // Now _load() will use the correct _isPeerBlockedByMe
     _subscribeMessages();
     _subscribeMyHides();
   }
@@ -87,6 +103,149 @@ class _ThreadScreenState extends State<ThreadScreen> {
     if (_chan != null) _sb.removeChannel(_chan!);
     if (_hidesChan != null) _sb.removeChannel(_hidesChan!);
     super.dispose();
+  }
+
+  void _snack(String message, {bool isError = false}) {
+    if (!mounted) return;
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(
+        content: Text(message),
+        backgroundColor: isError ? Theme.of(context).colorScheme.error : null,
+      ),
+    );
+  }
+
+  Future<void> _checkInitialBlockStatus() async {
+    final currentUserId = _myId;
+    // Ensure peerId is available and it's not a group chat
+    if (currentUserId == null || widget.args.isGroup || _peerId == null) return;
+
+    try {
+      // Check if I blocked them
+      final iBlockedThemRes = await _sb
+          .from('user_blocks')
+          .select('id')
+          .match({'blocker_user_id': currentUserId, 'blocked_user_id': _peerId!})
+          .maybeSingle();
+
+      // Check if they blocked me
+      final theyBlockedMeRes = await _sb
+          .from('user_blocks')
+          .select('id')
+          .match({'blocker_user_id': _peerId!, 'blocked_user_id': currentUserId})
+          .maybeSingle();
+
+      if (mounted) {
+        setState(() {
+          _isPeerBlockedByMe = iBlockedThemRes != null;
+          _amIBlockedByPeer = theyBlockedMeRes != null;
+        });
+      }
+    } catch (e) {
+      print("Error checking initial block status in ThreadScreen: $e");
+      // _snack("Could not verify block status.", isError: true); // Optional
+    }
+  }
+
+  Future<void> _toggleBlockPeer() async {
+    if (_isPeerBlockedByMe) {
+      await _unblockPeer();
+    } else {
+      await _initiateBlockPeer();
+    }
+  }
+
+  Future<void> _initiateBlockPeer() async {
+    final currentUserId = _myId;
+    final peerIdToBlock = _peerId; // From widget.args via initState
+    final peerName = _title; // Username from widget.args
+
+    if (currentUserId == null) {
+      _snack('You need to be logged in.', isError: true);
+      return;
+    }
+    if (peerIdToBlock == null) {
+      _snack('Cannot identify the other user to block.', isError: true);
+      return;
+    }
+    if (currentUserId == peerIdToBlock) {
+      _snack('You cannot block yourself.', isError: true);
+      return;
+    }
+    if (_isPeerBlockedByMe) {
+      _snack('$peerName is already blocked by you.');
+      return;
+    }
+    if (_amIBlockedByPeer) {
+      _snack('You cannot block this user as they have blocked you.', isError: true);
+      return;
+    }
+
+    final confirm = await showDialog<bool>(
+      context: context,
+      builder: (dialogContext) => AlertDialog(
+        title: Text('Block $peerName?'),
+        content: Text('You will no longer see their posts. They will not be able to call or message you. This chat will become read-only. Unblock from "Blocked Users" screen.'),
+        actions: <Widget>[
+          TextButton(child: const Text('Cancel'), onPressed: () => Navigator.pop(dialogContext, false)),
+          TextButton(
+            style: TextButton.styleFrom(foregroundColor: Theme.of(context).colorScheme.error),
+            child: const Text('Block'),
+            onPressed: () => Navigator.pop(dialogContext, true),
+          ),
+        ],
+      ),
+    );
+
+    if (confirm != true) return;
+
+    try {
+      await _sb.from('user_blocks').insert({
+        'blocker_user_id': currentUserId,
+        'blocked_user_id': peerIdToBlock,
+      });
+      if (mounted) {
+        setState(() { _isPeerBlockedByMe = true; });
+        _snack('$peerName has been blocked.');
+        _load();
+      }
+    } on PostgrestException catch (e) {
+      if (e.code == '23505') {
+        if (mounted) { setState(() { _isPeerBlockedByMe = true; }); }
+        _snack('$peerName is already blocked.');
+      } else {
+        _snack('Error blocking user: ${e.message}', isError: true);
+      }
+    } catch (e) {
+      _snack('An unexpected error occurred.', isError: true);
+    }
+  }
+
+  Future<void> _unblockPeer() async {
+    final currentUserId = _myId;
+    final peerIdToUnblock = _peerId;
+    final peerName = _title;
+
+    if (currentUserId == null || peerIdToUnblock == null) return;
+    if (!_isPeerBlockedByMe) {
+      _snack("$peerName is not currently blocked by you.");
+      return;
+    }
+
+    // Optional: Add confirmation dialog for unblocking too
+
+    try {
+      await _sb.from('user_blocks')
+          .delete()
+          .match({'blocker_user_id': currentUserId, 'blocked_user_id': peerIdToUnblock});
+      if(mounted){
+        setState(() { _isPeerBlockedByMe = false; });
+        _snack('$peerName has been unblocked.');
+        _load();
+      }
+    } catch (e) {
+      _snack('Error unblocking user: ${e.toString()}', isError: true);
+    }
   }
 
   // ------------------ Load ------------------
@@ -109,9 +268,22 @@ class _ThreadScreenState extends State<ThreadScreen> {
       }
 
       final rows = await q.order('created_at', ascending: true);
+
+      List<Map<String, dynamic>> fetchedMessages = (rows as List).cast<Map<String, dynamic>>();
+
+      List<Map<String, dynamic>> messagesToDisplay = List.from(fetchedMessages);
+
+      if (!_isGroup && _isPeerBlockedByMe && _peerId != null) { // Added !_isGroup check for safety
+        print('DEBUG: _load - Filtering historical messages because peer $_peerId is blocked by me.');
+        messagesToDisplay.removeWhere((msg) {
+          final messageSenderId = msg['sender_id'] as String?;
+          return messageSenderId == _peerId;
+        });
+      }
+
       _messages
         ..clear()
-        ..addAll((rows as List).cast<Map<String, dynamic>>());
+        ..addAll(messagesToDisplay);
 
       await _loadMyHidesFor(_messages.map((m) => m['id'] as String).toList());
 
@@ -198,18 +370,41 @@ class _ThreadScreenState extends State<ThreadScreen> {
           value: _tid,
         ),
         callback: (payload) {
-          final rec = payload.newRecord;
-          if (rec == null) return;
-          final createdAtStr = rec['created_at'] as String?;
+          final newMsgMap = payload.newRecord;
+          if (newMsgMap == null || newMsgMap.isEmpty) {
+            print('DEBUG: Sub - Received empty new message payload.');
+            return;
+          }
+
+          print('DEBUG: Sub - Raw new message payload: $newMsgMap');
+          final createdAtStr = newMsgMap['created_at'] as String?;
           if (_cutoff != null &&
               createdAtStr != null &&
               (DateTime.tryParse(createdAtStr)?.toUtc() ?? DateTime.now().toUtc())
                   .isBefore(_cutoff!)) {
             return;
           }
-          _messages.add(Map<String, dynamic>.from(rec));
-          if (mounted) setState(() {});
-          _scrollToBottomSoon();
+          final messageSenderId = newMsgMap['sender_id'] as String?;
+
+          if (!_isGroup && _isPeerBlockedByMe && _peerId != null && messageSenderId == _peerId) { // Added !_isGroup
+            print('DEBUG: Sub - Received message from blocked peer $_peerId. Hiding it. Message ID: ${newMsgMap['id']}');
+            return; // << CRITICAL: Correctly returning without adding/processing
+          }
+          // ---- >>> FILTERING LOGIC ENDS HERE <<< ----
+
+          // Add the message to the UI list
+          // Ensure the map structure is what your UI expects
+          final messageForUi = Map<String, dynamic>.from(newMsgMap);
+
+          if (mounted) {
+            setState(() {
+              _messages.add(messageForUi);
+              // You might need to re-sort if your list isn't always naturally ordered
+              // Or if your _load() orders differently than inserts.
+              // For simplicity, adding to end and relying on _scrollToBottomSoon.
+            });
+            _scrollToBottomSoon();
+          }
         },
       )
       ..onPostgresChanges(
@@ -275,8 +470,6 @@ class _ThreadScreenState extends State<ThreadScreen> {
   }
 
   // ------------------ Helpers ------------------
-  void _snack(String m) =>
-      ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(m)));
 
   bool _isUrl(String s) {
     final u = Uri.tryParse(s.trim());
@@ -464,6 +657,10 @@ class _ThreadScreenState extends State<ThreadScreen> {
 
   // ------------------ Send handlers ------------------
   Future<void> _sendText(String text) async {
+    if (!_isGroup && (_isPeerBlockedByMe || _amIBlockedByPeer)) {
+      _snack("Cannot send message. User is blocked or has blocked you.");
+      return;
+    }
     final me = _myId;
     if (me == null) {
       _snack('Not signed in');
@@ -487,6 +684,10 @@ class _ThreadScreenState extends State<ThreadScreen> {
 
   // ---- Upload files: fixed "Uploading…" under AppBar (no 1/N)
   Future<void> _sendFiles(List<File> files) async {
+    if (!_isGroup && (_isPeerBlockedByMe || _amIBlockedByPeer)) {
+      _snack("Cannot send message. User is blocked or has blocked you.");
+      return;
+    }
     final me = _myId;
     if (me == null) {
       _snack('Not signed in');
@@ -532,6 +733,10 @@ class _ThreadScreenState extends State<ThreadScreen> {
     required double lng,
     double? accuracyM,
   }) async {
+    if (!_isGroup && (_isPeerBlockedByMe || _amIBlockedByPeer)) {
+      _snack("Cannot send message. User is blocked or has blocked you.");
+      return;
+    }
     final me = _myId;
     if (me == null) {
       _snack('Not signed in');
@@ -961,7 +1166,17 @@ class _ThreadScreenState extends State<ThreadScreen> {
   // ------------------ UI ------------------
   @override
   Widget build(BuildContext context) {
-    final visible = _messages.where((m) => !_hidden.contains(m['id'])).toList();
+    final visibleMessages = _messages.where((m) {
+      final isHiddenByHideFeature = _hidden.contains(m['id']);
+      if (isHiddenByHideFeature) return false;
+
+      if (!_isGroup && _isPeerBlockedByMe && _peerId != null) {
+        final messageSenderId = m['sender_id'] as String?;
+        if (messageSenderId == _peerId) return false; // Hide if from blocked peer
+      }
+      return true;
+    }).toList();
+
 
     return Scaffold(
       appBar: AppBar(
@@ -995,18 +1210,26 @@ class _ThreadScreenState extends State<ThreadScreen> {
           ),
           PopupMenuButton<String>(
             onSelected: (v) {
+              if (v == 'block_toggle' && !_isGroup) _toggleBlockPeer();
               if (v == 'clear') _clearChatForMe();
-              if (v == 'add') _openAddMembers();
-              if (v == 'rename') _renameGroup();
-              if (v == 'leave') _leaveGroup();
+              if (v == 'add' && _isGroup) _openAddMembers();
+              if (v == 'rename' && _isGroup) _renameGroup();
+              if (v == 'leave' && _isGroup) _leaveGroup();
             },
             itemBuilder: (context) {
-              final items = <PopupMenuEntry<String>>[
-                const PopupMenuItem<String>(
-                  value: 'clear',
-                  child: Text('Clear chat for me'),
-                ),
-              ];
+              final items = <PopupMenuEntry<String>>[];
+              if (!_isGroup && _peerId != null) {
+                items.add(
+                  PopupMenuItem<String>(
+                    value: 'block_toggle',
+                    child: Text(_isPeerBlockedByMe ? 'Unblock ${_title}' : 'Block ${_title}'),
+                  ),
+                );
+              }
+              items.add(const PopupMenuItem<String>(
+                value: 'clear',
+                child: Text('Clear chat for me'),
+              ));
               if (_isGroup) {
                 items.addAll(const [
                   PopupMenuItem<String>(value: 'add', child: Text('Add members')),
@@ -1021,15 +1244,16 @@ class _ThreadScreenState extends State<ThreadScreen> {
       ),
       body: Column(
         children: [
+
           Expanded(
             child: _loading
                 ? const Center(child: CircularProgressIndicator())
                 : ListView.builder(
               controller: _scroll,
               padding: const EdgeInsets.fromLTRB(12, 12, 12, 8),
-              itemCount: visible.length,
+              itemCount: visibleMessages.length,
               itemBuilder: (context, i) {
-                final m = visible[i];
+                final m = visibleMessages[i];
                 final isMe = m['sender_id'] == _myId;
                 final senderId = m['sender_id'] as String?;
                 final kind = (m['kind'] as String?) ?? 'text';
@@ -1039,7 +1263,7 @@ class _ThreadScreenState extends State<ThreadScreen> {
                 // Show sender name in groups when sender changes and it's not me
                 bool showName = false;
                 if (_isGroup) {
-                  final prev = i > 0 ? visible[i - 1] : null;
+                  final prev = i > 0 ? visibleMessages[i - 1] : null;
                   final prevSender = prev?['sender_id'];
                   showName = !isMe && (prevSender != senderId);
                 }
@@ -1384,6 +1608,7 @@ class _ThreadScreenState extends State<ThreadScreen> {
           ),
           const Divider(height: 1),
           ChatInputBar(
+            enabled: !_isGroup && !_isPeerBlockedByMe && !_amIBlockedByPeer,
             onSendText: _sendText,
             onSendFiles: _sendFiles,
             onSendLocation: ({
@@ -1468,6 +1693,18 @@ class _ThreadScreenState extends State<ThreadScreen> {
   }
 
   Future<void> _startCall({required bool video}) async {
+
+    if (!_isGroup && _peerId != null) { // Only for 1v1 and if peerId is known
+      if (_isPeerBlockedByMe) {
+        _snack('You cannot call $_title. You have blocked them.', isError: true);
+        return;
+      }
+      if (_amIBlockedByPeer) {
+        _snack('You cannot call $_title. They have blocked you.', isError: true);
+        return;
+      }
+    }
+
     final me = _myId;
     if (me == null) {
       _snack('Not signed in');

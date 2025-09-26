@@ -11,7 +11,7 @@ class ChatInputBar extends StatefulWidget {
     required this.onSendText,
     required this.onSendFiles,
     required this.onSendLocation,
-    this.hintText = 'Type your message…',
+    this.hintText = 'Type your message…', required bool enabled,
   });
 
   final void Function(String text) onSendText;
