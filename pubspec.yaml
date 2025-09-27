@@ -63,6 +63,7 @@ flutter:
     - assets/aitalk_applogo.png
     # Ringtone
     - assets/ringtone.mp3
+    - assets/logo/ai_talk_logo.png
 
 # --- Splash screen configuration ---
 flutter_native_splash:
