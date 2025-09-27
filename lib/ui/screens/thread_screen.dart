@@ -655,33 +655,37 @@ class _ThreadScreenState extends State<ThreadScreen> {
     };
   }
 
-  // ---------- Push notify helper (NEW) ----------
+  // ---------- Push notify helper (FIXED) ----------
   Future<void> _notifyRecipients({required String preview}) async {
     try {
       final me = _myId;
       if (me == null) return;
 
-      final List<String> targets = [];
-      if (_isGroup) {
-        final ids = await _currentMemberIds();
-        targets.addAll(ids.where((id) => id != me));
-      } else if (_peerId != null) {
-        targets.add(_peerId!);
+      // (optional) if you have my profile cached in _members, pass my name
+      String? senderName;
+      final mine = _members[me];
+      if (mine != null) {
+        senderName = (mine['display_name'] ?? mine['username'] ?? mine['full_name']) as String?;
       }
-      if (targets.isEmpty) return;
 
+      // ✅ Let the edge function resolve recipients from threadId and exclude me.
       await _sb.functions.invoke(
         'send_push_users',
         body: {
-          'userIds': targets,
-          'title': _title,
-          'body': preview,
+          'threadId': _tid,              // server finds all members of this thread
+          'fromUserId': me,              // sender (server excludes this id)
+          'preview': preview,            // becomes notification body
+          if (senderName != null) 'senderName': senderName,  // server will also look up if omitted
           'route': '/thread/$_tid',
-          'isCall': false,
+          'data': {
+            'threadId': _tid,
+            'senderId': me,              // client-side guard to ignore self in foreground
+          },
+          'pruneInvalid': true,
         },
       );
     } catch (e) {
-      // Do not block UI on push errors; just log.
+      // Don’t block sending if push fails
       // ignore: avoid_print
       print('send_push_users error: $e');
     }

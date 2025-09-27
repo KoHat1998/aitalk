@@ -1,8 +1,11 @@
+// lib/ui/screens/sign_in_screen.dart
+import 'dart:io';
+
 import 'package:flutter/material.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
 import '../../core/app_routes.dart';
-import '../../core/push_token.dart';     // ✅ added
-import '../../core/push_service.dart';   // ✅ added (for logging token)
+import '../../core/push_token.dart';
+import '../../core/push_service.dart';
 
 class SignInScreen extends StatefulWidget {
   const SignInScreen({super.key});
@@ -38,10 +41,15 @@ class _SignInScreenState extends State<SignInScreen> {
       // ✅ Save/refresh this device's FCM token for the signed-in user
       try {
         final token = await PushService.getToken();
-        // For visibility in your Run/Logcat console:
         // ignore: avoid_print
         print('FCM token after login: $token');
-        await PushToken.registerForCurrentUser(platform: 'android');
+        await PushToken.registerForCurrentUser(
+          platform: Platform.isAndroid
+              ? 'android'
+              : Platform.isIOS
+              ? 'ios'
+              : 'other',
+        );
       } catch (e) {
         // ignore: avoid_print
         print('Push token register error: $e');
@@ -77,7 +85,6 @@ class _SignInScreenState extends State<SignInScreen> {
                 child: Column(
                   crossAxisAlignment: CrossAxisAlignment.stretch,
                   children: [
-                    // Header
                     Text(
                       'Welcome Back!',
                       textAlign: TextAlign.center,
@@ -92,7 +99,7 @@ class _SignInScreenState extends State<SignInScreen> {
                       style: Theme.of(context).textTheme.bodyMedium,
                     ),
                     const SizedBox(height: 24),
-                    // Switch bar
+
                     Row(
                       mainAxisAlignment: MainAxisAlignment.center,
                       children: [
@@ -108,7 +115,6 @@ class _SignInScreenState extends State<SignInScreen> {
                     ),
                     const SizedBox(height: 16),
 
-                    // Email
                     TextFormField(
                       controller: _email,
                       keyboardType: TextInputType.emailAddress,
@@ -122,7 +128,6 @@ class _SignInScreenState extends State<SignInScreen> {
                     ),
                     const SizedBox(height: 12),
 
-                    // Password
                     TextFormField(
                       controller: _password,
                       obscureText: _obscure,
@@ -140,7 +145,6 @@ class _SignInScreenState extends State<SignInScreen> {
 
                     const SizedBox(height: 28),
 
-                    // Log in button
                     ElevatedButton(
                       onPressed: _loading ? null : _signIn,
                       child: Padding(

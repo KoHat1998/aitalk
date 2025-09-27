@@ -1,9 +1,12 @@
+// lib/features/settings/settings_screen.dart
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
+
 import '../../core/app_routes.dart';
+import '../../core/push_token.dart';            // ✅ rotate & register FCM tokens
 import '../widgets/avatar.dart';
-import 'ai_talk_screen.dart'; // <--- import your AI TALK screen
+import 'ai_talk_screen.dart';
 import 'package:sabai/features/support/help_support_screen.dart';
 
 class SettingsScreen extends StatefulWidget {
@@ -36,9 +39,22 @@ class _SettingsScreenState extends State<SettingsScreen> {
     return base.replaceAll(RegExp(r'[._]+'), ' ').trim();
   }
 
+  /// Sign out that **rotates** the device token so the next account on this
+  /// device gets a fresh token (prevents “token sticks to first account”).
   Future<void> _signOut() async {
-    await _sb.auth.signOut();
+    try {
+      // 1) Rotate token FIRST (delete DB row + device token)
+      await PushToken.rotateOnLogout();
+    } catch (_) {}
+
+    try {
+      // 2) End auth session
+      await _sb.auth.signOut();
+    } catch (_) {}
+
     if (!mounted) return;
+
+    // 3) Go to sign-in
     Navigator.pushNamedAndRemoveUntil(context, AppRoutes.signIn, (_) => false);
   }
 
@@ -67,9 +83,8 @@ class _SettingsScreenState extends State<SettingsScreen> {
               ? metaDisplay!
               : (email.isNotEmpty ? _nameFromEmail(email) : 'Your Name'));
 
-          final avatarLabel = displayName.isNotEmpty
-              ? displayName
-              : (email.isNotEmpty ? email : 'User');
+          final avatarLabel =
+          displayName.isNotEmpty ? displayName : (email.isNotEmpty ? email : 'User');
 
           return ListView(
             padding: const EdgeInsets.all(16),
@@ -78,8 +93,10 @@ class _SettingsScreenState extends State<SettingsScreen> {
                 child: ListTile(
                   contentPadding: const EdgeInsets.all(16),
                   leading: Avatar(name: avatarLabel, size: 46),
-                  title: Text(displayName,
-                      style: const TextStyle(fontWeight: FontWeight.w600)),
+                  title: Text(
+                    displayName,
+                    style: const TextStyle(fontWeight: FontWeight.w600),
+                  ),
                   subtitle: Text(email.isNotEmpty ? email : 'Not signed in'),
                   trailing: FilledButton.tonal(
                     onPressed: () async {
@@ -133,20 +150,26 @@ class _SettingsScreenState extends State<SettingsScreen> {
               const Text('Notification Preferences',
                   style: TextStyle(fontWeight: FontWeight.w600)),
               Card(
-                  child: SwitchListTile(
-                      title: const Text('Message Notifications'),
-                      value: _msgNoti,
-                      onChanged: (v) => setState(() => _msgNoti = v))),
+                child: SwitchListTile(
+                  title: const Text('Message Notifications'),
+                  value: _msgNoti,
+                  onChanged: (v) => setState(() => _msgNoti = v),
+                ),
+              ),
               Card(
-                  child: SwitchListTile(
-                      title: const Text('Group Notifications'),
-                      value: _groupNoti,
-                      onChanged: (v) => setState(() => _groupNoti = v))),
+                child: SwitchListTile(
+                  title: const Text('Group Notifications'),
+                  value: _groupNoti,
+                  onChanged: (v) => setState(() => _groupNoti = v),
+                ),
+              ),
               Card(
-                  child: SwitchListTile(
-                      title: const Text('Read Receipts'),
-                      value: _readReceipts,
-                      onChanged: (v) => setState(() => _readReceipts = v))),
+                child: SwitchListTile(
+                  title: const Text('Read Receipts'),
+                  value: _readReceipts,
+                  onChanged: (v) => setState(() => _readReceipts = v),
+                ),
+              ),
 
               const SizedBox(height: 16),
               const Text('App Settings',
@@ -170,20 +193,21 @@ class _SettingsScreenState extends State<SettingsScreen> {
                     if (authEmail.isEmpty) {
                       ScaffoldMessenger.of(context).showSnackBar(
                         const SnackBar(
-                            content: Text('Please sign in to contact support.')),
+                          content: Text('Please sign in to contact support.'),
+                        ),
                       );
                       return;
                     }
                     Navigator.push(
                       context,
                       MaterialPageRoute(
-                        builder: (_) =>
-                            HelpSupportScreen(userEmail: authEmail),
+                        builder: (_) => HelpSupportScreen(userEmail: authEmail),
                       ),
                     );
                   },
                 ),
               ),
+
               // --- AI TALK navigation
               Card(
                 child: ListTile(
@@ -205,7 +229,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
                 child: ListTile(
                   leading: const Icon(Icons.logout),
                   title: const Text('Logout'),
-                  onTap: _signOut,
+                  onTap: _signOut, // ✅ rotates token then signs out
                 ),
               ),
             ],
