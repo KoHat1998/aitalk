@@ -655,6 +655,38 @@ class _ThreadScreenState extends State<ThreadScreen> {
     };
   }
 
+  // ---------- Push notify helper (NEW) ----------
+  Future<void> _notifyRecipients({required String preview}) async {
+    try {
+      final me = _myId;
+      if (me == null) return;
+
+      final List<String> targets = [];
+      if (_isGroup) {
+        final ids = await _currentMemberIds();
+        targets.addAll(ids.where((id) => id != me));
+      } else if (_peerId != null) {
+        targets.add(_peerId!);
+      }
+      if (targets.isEmpty) return;
+
+      await _sb.functions.invoke(
+        'send_push_users',
+        body: {
+          'userIds': targets,
+          'title': _title,
+          'body': preview,
+          'route': '/thread/$_tid',
+          'isCall': false,
+        },
+      );
+    } catch (e) {
+      // Do not block UI on push errors; just log.
+      // ignore: avoid_print
+      print('send_push_users error: $e');
+    }
+  }
+
   // ------------------ Send handlers ------------------
   Future<void> _sendText(String text) async {
     if (!_isGroup && (_isPeerBlockedByMe || _amIBlockedByPeer)) {
@@ -674,6 +706,10 @@ class _ThreadScreenState extends State<ThreadScreen> {
         'kind': 'text',
         'body': text.trim(),
       });
+
+      // 🔔 Notify recipients with a short preview
+      final preview = text.trim().replaceAll('\n', ' ');
+      await _notifyRecipients(preview: preview.length > 80 ? '${preview.substring(0, 80)}…' : preview);
     } catch (e) {
       _snack('Send failed: $e');
     } finally {
@@ -715,6 +751,9 @@ class _ThreadScreenState extends State<ThreadScreen> {
           'body': url,
         });
       }
+
+      // 🔔 One notification for the batch
+      await _notifyRecipients(preview: '📎 Attachment');
       _snack('Sent ${files.length} file${files.length == 1 ? '' : 's'}');
     } on StorageException catch (e) {
       _snack(e.message.contains('Bucket not found')
@@ -754,6 +793,9 @@ class _ThreadScreenState extends State<ThreadScreen> {
         'location_lng': lng,
         'location_accuracy_m': accuracyM,
       });
+
+      // 🔔 Notify recipients
+      await _notifyRecipients(preview: '📍 Shared a location');
     } catch (e) {
       _snack('Location send failed: $e');
     } finally {

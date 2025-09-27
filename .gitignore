@@ -12,7 +12,7 @@
 .env
 .swiftpm/
 migrate_working_dir/
-
+.google-services.json
 # IntelliJ related
 *.iml
 *.ipr
