@@ -1,24 +1,17 @@
-// lib/main.dart
-import 'dart:io';
-
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
-import 'core/app_theme.dart';
-import 'core/app_routes.dart';
 import 'package:flutter_dotenv/flutter_dotenv.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
 import 'core/env.dart';
-import 'package:google_mobile_ads/google_mobile_ads.dart';
-
-// Push
+import 'core/app_theme.dart';
+import 'core/app_routes.dart';
 import 'core/push_service.dart';
-import 'core/push_token.dart';
 
+// A global navigator so PushService.onOpenRoute can push named routes from anywhere.
 final GlobalKey<NavigatorState> navigatorKey = GlobalKey<NavigatorState>();
 
 Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
-  await MobileAds.instance.initialize();
 
   await dotenv.load(fileName: '.env');
   Env.assertConfigured();
@@ -28,34 +21,22 @@ Future<void> main() async {
     anonKey: Env.supabaseAnonKey,
   );
 
-  // Initialize push (channels, permissions, handlers)
+  // ✅ Initialize push once, with deep-link handler
   await PushService.init(
     onOpenRoute: (route) {
-      final ctx = navigatorKey.currentState?.context;
-      if (ctx != null && route.isNotEmpty) {
-        Navigator.of(ctx).pushNamed(route);
-      }
+      // Expecting routes like: /incoming_call?callId=...&thread=...
+      navigatorKey.currentState?.pushNamed(route);
+    },
+    onForegroundMessage: (_) {
+      // no banner for messages in-foreground; refresh UI/badge if you want
     },
   );
 
-  // If already logged in, store this device's token
-  final user = Supabase.instance.client.auth.currentUser;
-  if (user != null) {
-    try {
-      await PushToken.registerForCurrentUser(
-        platform: Platform.isAndroid
-            ? 'android'
-            : Platform.isIOS
-            ? 'ios'
-            : 'other',
-      );
-    } catch (_) {}
-  }
-
+  // Light icons on a dark UI
   SystemChrome.setSystemUIOverlayStyle(const SystemUiOverlayStyle(
     statusBarColor: Colors.transparent,
-    statusBarIconBrightness: Brightness.light,
-    statusBarBrightness: Brightness.dark,
+    statusBarIconBrightness: Brightness.light, // Android
+    statusBarBrightness: Brightness.dark,      // iOS
     systemNavigationBarColor: Colors.black,
     systemNavigationBarIconBrightness: Brightness.light,
   ));
@@ -75,7 +56,7 @@ class AiTalkApp extends StatelessWidget {
       themeMode: ThemeMode.dark,
       onGenerateRoute: AppRoutes.onGenerateRoute,
       initialRoute: AppRoutes.splash,
-      navigatorKey: navigatorKey,
+      navigatorKey: navigatorKey, // ✅ allow PushService to navigate
     );
   }
 }
