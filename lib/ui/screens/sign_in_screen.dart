@@ -1,6 +1,8 @@
 import 'package:flutter/material.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
 import '../../core/app_routes.dart';
+import '../../core/push_token.dart';     // ✅ added
+import '../../core/push_service.dart';   // ✅ added (for logging token)
 
 class SignInScreen extends StatefulWidget {
   const SignInScreen({super.key});
@@ -32,6 +34,19 @@ class _SignInScreenState extends State<SignInScreen> {
         email: _email.text.trim(),
         password: _password.text,
       );
+
+      // ✅ Save/refresh this device's FCM token for the signed-in user
+      try {
+        final token = await PushService.getToken();
+        // For visibility in your Run/Logcat console:
+        // ignore: avoid_print
+        print('FCM token after login: $token');
+        await PushToken.registerForCurrentUser(platform: 'android');
+      } catch (e) {
+        // ignore: avoid_print
+        print('Push token register error: $e');
+      }
+
       if (!mounted) return;
       Navigator.pushReplacementNamed(context, AppRoutes.shell);
     } on AuthException catch (e) {
