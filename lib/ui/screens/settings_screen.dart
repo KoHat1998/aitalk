@@ -3,9 +3,8 @@ import 'package:flutter/services.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
 import '../../core/app_routes.dart';
 import '../widgets/avatar.dart';
-// Use your package name from pubspec.yaml (you have "sabai")
+import 'ai_talk_screen.dart'; // <--- import your AI TALK screen
 import 'package:sabai/features/support/help_support_screen.dart';
-
 
 class SettingsScreen extends StatefulWidget {
   const SettingsScreen({super.key});
@@ -57,8 +56,10 @@ class _SettingsScreenState extends State<SettingsScreen> {
           final dbEmail = (snap.data?['email'] as String?)?.trim();
           final code = (snap.data?['contact_code'] as String?)?.trim();
 
-          final metaDisplay = user?.userMetadata?['display_name']?.toString().trim();
-          final email = (dbEmail?.isNotEmpty ?? false) ? dbEmail! : (user?.email ?? '');
+          final metaDisplay =
+          user?.userMetadata?['display_name']?.toString().trim();
+          final email =
+          (dbEmail?.isNotEmpty ?? false) ? dbEmail! : (user?.email ?? '');
 
           final displayName = (dbDisplay?.isNotEmpty ?? false)
               ? dbDisplay!
@@ -66,7 +67,9 @@ class _SettingsScreenState extends State<SettingsScreen> {
               ? metaDisplay!
               : (email.isNotEmpty ? _nameFromEmail(email) : 'Your Name'));
 
-          final avatarLabel = displayName.isNotEmpty ? displayName : (email.isNotEmpty ? email : 'User');
+          final avatarLabel = displayName.isNotEmpty
+              ? displayName
+              : (email.isNotEmpty ? email : 'User');
 
           return ListView(
             padding: const EdgeInsets.all(16),
@@ -75,11 +78,13 @@ class _SettingsScreenState extends State<SettingsScreen> {
                 child: ListTile(
                   contentPadding: const EdgeInsets.all(16),
                   leading: Avatar(name: avatarLabel, size: 46),
-                  title: Text(displayName, style: const TextStyle(fontWeight: FontWeight.w600)),
+                  title: Text(displayName,
+                      style: const TextStyle(fontWeight: FontWeight.w600)),
                   subtitle: Text(email.isNotEmpty ? email : 'Not signed in'),
                   trailing: FilledButton.tonal(
                     onPressed: () async {
-                      final changed = await Navigator.pushNamed(context, AppRoutes.editProfile);
+                      final changed = await Navigator.pushNamed(
+                          context, AppRoutes.editProfile);
                       if (changed == true && mounted) setState(() {});
                     },
                     child: const Text('Edit Profile'),
@@ -93,7 +98,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
                 ),
               const SizedBox(height: 12),
 
-              // NEW: My friend code
+              // --- My friend code
               if (code != null && code.isNotEmpty)
                 Card(
                   child: ListTile(
@@ -108,13 +113,16 @@ class _SettingsScreenState extends State<SettingsScreen> {
                           icon: const Icon(Icons.copy),
                           onPressed: () {
                             Clipboard.setData(ClipboardData(text: code));
-                            ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Code copied')));
+                            ScaffoldMessenger.of(context).showSnackBar(
+                              const SnackBar(content: Text('Code copied')),
+                            );
                           },
                         ),
                         IconButton(
                           tooltip: 'Show QR',
                           icon: const Icon(Icons.open_in_new),
-                          onPressed: () => Navigator.pushNamed(context, AppRoutes.myCode),
+                          onPressed: () =>
+                              Navigator.pushNamed(context, AppRoutes.myCode),
                         ),
                       ],
                     ),
@@ -122,40 +130,84 @@ class _SettingsScreenState extends State<SettingsScreen> {
                 ),
 
               const SizedBox(height: 16),
-              const Text('Notification Preferences', style: TextStyle(fontWeight: FontWeight.w600)),
-              Card(child: SwitchListTile(title: const Text('Message Notifications'), value: _msgNoti, onChanged: (v) => setState(() => _msgNoti = v))),
-              Card(child: SwitchListTile(title: const Text('Group Notifications'), value: _groupNoti, onChanged: (v) => setState(() => _groupNoti = v))),
-              Card(child: SwitchListTile(title: const Text('Read Receipts'), value: _readReceipts, onChanged: (v) => setState(() => _readReceipts = v))),
+              const Text('Notification Preferences',
+                  style: TextStyle(fontWeight: FontWeight.w600)),
+              Card(
+                  child: SwitchListTile(
+                      title: const Text('Message Notifications'),
+                      value: _msgNoti,
+                      onChanged: (v) => setState(() => _msgNoti = v))),
+              Card(
+                  child: SwitchListTile(
+                      title: const Text('Group Notifications'),
+                      value: _groupNoti,
+                      onChanged: (v) => setState(() => _groupNoti = v))),
+              Card(
+                  child: SwitchListTile(
+                      title: const Text('Read Receipts'),
+                      value: _readReceipts,
+                      onChanged: (v) => setState(() => _readReceipts = v))),
 
               const SizedBox(height: 16),
-              const Text('App Settings', style: TextStyle(fontWeight: FontWeight.w600)),
-              Card(child: ListTile(leading: const Icon(Icons.privacy_tip_outlined), title: const Text('Privacy Policy'), trailing: const Icon(Icons.chevron_right), onTap: () {})),
+              const Text('App Settings',
+                  style: TextStyle(fontWeight: FontWeight.w600)),
+              Card(
+                child: ListTile(
+                  leading: const Icon(Icons.privacy_tip_outlined),
+                  title: const Text('Privacy Policy'),
+                  trailing: const Icon(Icons.chevron_right),
+                  onTap: () {},
+                ),
+              ),
               Card(
                 child: ListTile(
                   leading: const Icon(Icons.help_outline),
                   title: const Text('Help & Support'),
                   trailing: const Icon(Icons.chevron_right),
                   onTap: () {
-                    final authEmail = Supabase.instance.client.auth.currentUser?.email ?? '';
+                    final authEmail =
+                        Supabase.instance.client.auth.currentUser?.email ?? '';
                     if (authEmail.isEmpty) {
                       ScaffoldMessenger.of(context).showSnackBar(
-                        const SnackBar(content: Text('Please sign in to contact support.')),
+                        const SnackBar(
+                            content: Text('Please sign in to contact support.')),
                       );
                       return;
                     }
                     Navigator.push(
                       context,
                       MaterialPageRoute(
-                        builder: (_) => HelpSupportScreen(userEmail: authEmail),
+                        builder: (_) =>
+                            HelpSupportScreen(userEmail: authEmail),
                       ),
                     );
                   },
                 ),
               ),
-              Card(child: ListTile(leading: const Icon(Icons.info_outline), title: const Text('AI TALK'), trailing: const Icon(Icons.chevron_right), onTap: () {})),
+              // --- AI TALK navigation
+              Card(
+                child: ListTile(
+                  leading: const Icon(Icons.info_outline),
+                  title: const Text('AI TALK'),
+                  trailing: const Icon(Icons.chevron_right),
+                  onTap: () {
+                    Navigator.of(context).push(
+                      MaterialPageRoute(
+                        builder: (_) => const AiTalkScreen(),
+                      ),
+                    );
+                  },
+                ),
+              ),
 
               const SizedBox(height: 16),
-              Card(child: ListTile(leading: const Icon(Icons.logout), title: const Text('Logout'), onTap: _signOut)),
+              Card(
+                child: ListTile(
+                  leading: const Icon(Icons.logout),
+                  title: const Text('Logout'),
+                  onTap: _signOut,
+                ),
+              ),
             ],
           );
         },
