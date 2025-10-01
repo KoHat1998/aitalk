@@ -1,4 +1,6 @@
-<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+<?xml version="1.0" encoding="utf-8"?>
+<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:tools="http://schemas.android.com/tools">
 
     <!-- Network & media permissions -->
     <uses-permission android:name="android.permission.INTERNET" />
@@ -10,10 +12,10 @@
     <uses-permission android:name="android.permission.ACCESS_COARSE_LOCATION" />
     <uses-permission android:name="android.permission.ACCESS_FINE_LOCATION" />
 
-    <!-- ✅ Required for fullScreenIntent call notifications on Android 10+ -->
+    <!-- Required for full-screen incoming call notifications -->
     <uses-permission android:name="android.permission.USE_FULL_SCREEN_INTENT" />
 
-    <!-- Foreground services for live calls (Android 9+) -->
+    <!-- Foreground services for live calls -->
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_CAMERA" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MICROPHONE" />
@@ -25,11 +27,20 @@
     <!-- Runtime notifications (Android 13+) -->
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
 
+    <!-- Optional but recommended -->
+    <uses-permission android:name="android.permission.VIBRATE" />
+
     <application
-        android:label="Ai Talk"
         android:name="${applicationName}"
+        android:label="Ai Talk"
         android:icon="@mipmap/ic_launcher">
 
+        <!-- Default channel for Firebase notifications (must match your code) -->
+        <meta-data
+            android:name="com.google.firebase.messaging.default_notification_channel_id"
+            android:value="default_channel" />
+
+        <!-- (If you use AdMob; keep/remove as needed) -->
         <meta-data
             android:name="com.google.android.gms.ads.APPLICATION_ID"
             android:value="ca-app-pub-3940256099942544~3347511713" />
@@ -44,7 +55,8 @@
             android:hardwareAccelerated="true"
             android:windowSoftInputMode="adjustResize"
             android:showWhenLocked="true"
-            android:turnScreenOn="true">
+            android:turnScreenOn="true"
+            tools:targetApi="o_mr1">
 
             <!-- Theme used before Flutter UI draws -->
             <meta-data
@@ -55,20 +67,27 @@
                 <action android:name="android.intent.action.MAIN" />
                 <category android:name="android.intent.category.LAUNCHER" />
             </intent-filter>
+
+            <intent-filter>
+                <action android:name="FLUTTER_NOTIFICATION_CLICK" />
+                <category android:name="android.intent.category.DEFAULT" />
+            </intent-filter>
+
+
+
         </activity>
 
-        <!-- Flutter tool hook -->
+        <!-- Flutter embedding v2 -->
         <meta-data
             android:name="flutterEmbedding"
             android:value="2" />
     </application>
 
-        <!-- Package visibility for Process Text plugin -->
+    <!-- Package visibility for PROCESS_TEXT plugin -->
     <queries>
         <intent>
             <action android:name="android.intent.action.PROCESS_TEXT" />
             <data android:mimeType="text/plain" />
         </intent>
     </queries>
-
 </manifest>

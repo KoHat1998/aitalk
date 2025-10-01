@@ -1,6 +1,8 @@
+// lib/ui/screens/splash_screen.dart
 import 'package:flutter/material.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
 import '../../core/app_routes.dart';
+import '../../core/push_route_handler.dart'; // markPushRoutingReady()
 
 class SplashScreen extends StatefulWidget {
   const SplashScreen({super.key});
@@ -16,16 +18,20 @@ class _SplashScreenState extends State<SplashScreen> {
   }
 
   Future<void> _decide() async {
-    // tiny delay so the spinner shows
-    await Future.delayed(const Duration(milliseconds: 600));
-    final session = Supabase.instance.client.auth.currentSession;
+    // tiny delay so the spinner shows (optional)
+    await Future.delayed(const Duration(milliseconds: 300));
 
+    // ⬅️ IMPORTANT: await the Future<bool>
+    final consumed = await markPushRoutingReady();
+    if (consumed) return; // deep link (thread/call) already navigated
+
+    // No deep link handled — proceed to your normal start destination
+    final session = Supabase.instance.client.auth.currentSession;
     if (!mounted) return;
-    if (session != null) {
-      Navigator.pushReplacementNamed(context, AppRoutes.shell);
-    } else {
-      Navigator.pushReplacementNamed(context, AppRoutes.signIn);
-    }
+    Navigator.pushReplacementNamed(
+      context,
+      session != null ? AppRoutes.shell : AppRoutes.signIn,
+    );
   }
 
   @override

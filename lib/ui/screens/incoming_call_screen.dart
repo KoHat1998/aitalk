@@ -1,13 +1,16 @@
+// lib/ui/screens/incoming_call_screen.dart
 import 'package:flutter/material.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
+
 import '../../core/app_routes.dart';
 import '../../core/ringtone.dart';
+import '../../core/push_service.dart';
 import 'call_screen.dart' show CallArgs;
 
 class IncomingCallArgs {
-  final String inviteId;
+  final String inviteId;   // DB row id (or your generated callId)
   final String threadId;
-  final String callerName;
+  final String callerName; // may be empty; we’ll resolve if so
   final bool video;
   const IncomingCallArgs({
     required this.inviteId,
@@ -30,31 +33,58 @@ class _IncomingCallScreenState extends State<IncomingCallScreen>
   final _sb = Supabase.instance.client;
   RealtimeChannel? _chan;
   bool _acting = false;
+  bool _accepted = false;
+
+  String _callerLabel = '';
 
   @override
   void initState() {
     super.initState();
     WidgetsBinding.instance.addObserver(this);
+
+    debugPrint(
+      '[IncomingCallScreen] inviteId=${widget.args.inviteId} '
+          'threadId=${widget.args.threadId} video=${widget.args.video} '
+          'callerName="${widget.args.callerName}"',
+    );
+
     Ringtone.start();
+
+    final incoming = widget.args.callerName.trim().toLowerCase();
+    _callerLabel = (incoming.isEmpty ||
+        incoming == 'aitalk' ||
+        incoming == 'someone' ||
+        incoming == 'unknown' ||
+        incoming == 'null' ||
+        incoming == 'undefined')
+        ? ''
+        : widget.args.callerName.trim();
+
     _listenInvite();
+
+    if (_callerLabel.isEmpty) {
+      _loadCallerName(); // resolve name from DB if missing
+    }
   }
 
   @override
   void dispose() {
     WidgetsBinding.instance.removeObserver(this);
-    if (_chan != null) _sb.removeChannel(_chan!);
-    Ringtone.stop();
+    try {
+      if (_chan != null) _sb.removeChannel(_chan!);
+    } catch (_) {}
+    if (!_accepted) {
+      Ringtone.stop();
+    }
     super.dispose();
   }
 
   @override
   void didChangeAppLifecycleState(AppLifecycleState state) {
-    // keep behavior predictable if app backgrounds
-    if (state == AppLifecycleState.paused ||
-        state == AppLifecycleState.inactive) {
+    if (_acting) return; // don't restart sound once user acted
+    if (state == AppLifecycleState.paused || state == AppLifecycleState.inactive) {
       Ringtone.stop();
-    } else if (state == AppLifecycleState.resumed && !_acting) {
-      // resume ring when returning (still not acted upon)
+    } else if (state == AppLifecycleState.resumed) {
       Ringtone.start();
     }
   }
@@ -73,34 +103,93 @@ class _IncomingCallScreenState extends State<IncomingCallScreen>
       ),
       callback: (payload) {
         final status = payload.newRecord?['status'] as String?;
+        debugPrint('[Incoming] invite update → $status');
         if (status == null) return;
-
-        if (status == 'canceled' ||
-            status == 'timeout' ||
-            status == 'ended') {
-          _stopAndPop(); // caller canceled/ended
+        if (status == 'canceled' || status == 'timeout' || status == 'ended') {
+          _stopAndPop();
         }
       },
     )
         .subscribe();
   }
 
+  Future<void> _loadCallerName() async {
+    try {
+      final me = _sb.auth.currentUser?.id;
+      if (me == null) return;
+
+      final memRows = await _sb
+          .from('thread_members')
+          .select('user_id')
+          .eq('thread_id', widget.args.threadId);
+
+      final ids = (memRows as List)
+          .map((r) => (r as Map)['user_id'] as String)
+          .where((id) => id != me)
+          .toList();
+
+      if (ids.isEmpty) return;
+
+      final orClause = ids.map((id) => 'id.eq.$id').join(',');
+      final profs = await _sb
+          .from('users')
+          .select('id, display_name, email')
+          .or(orClause);
+
+      String? resolved;
+      for (final p in profs as List) {
+        final m = p as Map<String, dynamic>;
+        final dn = (m['display_name'] as String?)?.trim();
+        if (dn != null && dn.isNotEmpty) {
+          resolved = dn;
+          break;
+        }
+        final email = (m['email'] as String?) ?? '';
+        if (email.isNotEmpty) {
+          resolved = email.split('@').first;
+          break;
+        }
+      }
+
+      if (resolved != null && resolved.isNotEmpty && mounted) {
+        setState(() => _callerLabel = resolved!);
+      }
+    } catch (_) {
+      // ignore lookup errors
+    }
+  }
+
   Future<void> _accept() async {
     if (_acting) return;
     _acting = true;
     try {
-      await _sb
+      final updated = await _sb
           .from('call_invites')
-          .update({'status': 'accepted'}).eq('id', widget.args.inviteId);
+          .update({'status': 'accepted'})
+          .eq('id', widget.args.inviteId)
+          .select('id')
+          .maybeSingle();
 
+      if (updated == null) {
+        throw Exception('Invite not found: ${widget.args.inviteId}');
+      }
+
+      await PushService.startCallSession(callId: widget.args.inviteId);
       Ringtone.stop();
+
       if (!mounted) return;
+      _accepted = true;
+
+      final title = _callerLabel.isNotEmpty
+          ? _callerLabel
+          : (widget.args.video ? 'Video call' : 'Audio call');
+
       Navigator.pushReplacementNamed(
         context,
         AppRoutes.call,
         arguments: CallArgs(
           threadId: widget.args.threadId,
-          title: widget.args.callerName,
+          title: title,
           video: widget.args.video,
           inviteId: widget.args.inviteId,
         ),
@@ -117,9 +206,18 @@ class _IncomingCallScreenState extends State<IncomingCallScreen>
     if (_acting) return;
     _acting = true;
     try {
-      await _sb
+      final updated = await _sb
           .from('call_invites')
-          .update({'status': 'declined'}).eq('id', widget.args.inviteId);
+          .update({'status': 'declined'})
+          .eq('id', widget.args.inviteId)
+          .select('id')
+          .maybeSingle();
+
+      if (updated == null) {
+        throw Exception('Invite not found: ${widget.args.inviteId}');
+      }
+
+      await PushService.endCallSession(callId: widget.args.inviteId);
       _stopAndPop();
     } catch (e) {
       _acting = false;
@@ -156,12 +254,14 @@ class _IncomingCallScreenState extends State<IncomingCallScreen>
                     ),
                     const SizedBox(height: 16),
                     Text(
-                      widget.args.callerName,
+                      _callerLabel.isNotEmpty
+                          ? _callerLabel
+                          : 'Incoming ${widget.args.video ? "video" : "audio"} call',
                       textAlign: TextAlign.center,
                       style: Theme.of(context)
                           .textTheme
                           .titleLarge
-                          ?.copyWith(color: Colors.white),
+                          ?.copyWith(color: Colors.white, fontWeight: FontWeight.w600),
                     ),
                     const SizedBox(height: 8),
                     Text(
@@ -230,4 +330,3 @@ class _IncomingCallScreenState extends State<IncomingCallScreen>
     );
   }
 }
-

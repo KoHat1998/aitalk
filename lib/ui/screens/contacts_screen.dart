@@ -1,11 +1,11 @@
+// lib/ui/screens/contacts_screen.dart
 import 'package:flutter/material.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
 
 import '../../core/app_routes.dart';
+import '../../core/call_actions.dart' as calls;
 import '../widgets/avatar.dart';
 import 'thread_screen.dart';
-
-// Ringing flow
 import 'outgoing_call_screen.dart' show OutgoingCallArgs;
 
 class ContactsScreen extends StatefulWidget {
@@ -59,7 +59,7 @@ class _ContactsScreenState extends State<ContactsScreen> {
       final ids = <String>[];
       final seen = <String>{};
       for (final r in rows as List) {
-        final id = (r['contact_id'] as String?) ?? '';
+        final id = (r as Map)['contact_id'] as String? ?? '';
         if (id.isNotEmpty && !seen.contains(id)) {
           seen.add(id);
           ids.add(id);
@@ -127,6 +127,7 @@ class _ContactsScreenState extends State<ContactsScreen> {
     }
   }
 
+  /// Returns: 'blocked' (me blocked them), 'blocked_by_peer', 'none', 'error'
   Future<String> _checkBlockStatus(String peerId) async {
     final me = _sb.auth.currentUser?.id;
     if (me == null) return 'error';
@@ -135,35 +136,71 @@ class _ContactsScreenState extends State<ContactsScreen> {
       final iBlockedThem = await _sb
           .from('user_blocks')
           .select('id')
-          .match({'blocker_user_id' : me, 'blocked_user_id' : peerId})
+          .match({'blocker_user_id': me, 'blocked_user_id': peerId})
           .maybeSingle();
-      if (iBlockedThem != null) {
-        return 'blocked';
-      }
+      if (iBlockedThem != null) return 'blocked';
 
       final theyBlockedMe = await _sb
           .from('user_blocks')
           .select('id')
-          .match({'blocker_user_id' : peerId, 'blocked_user_id' : me})
+          .match({'blocker_user_id': peerId, 'blocked_user_id': me})
           .maybeSingle();
-      if (theyBlockedMe != null) {
-        return 'blocked_by_peer';
-      }
+      if (theyBlockedMe != null) return 'blocked_by_peer';
+
       return 'none';
-    } catch (e) {
-      print('Error checking block status: $e');
+    } catch (_) {
       return 'error';
     }
+  }
+
+  // --- Helper: resolve MY display name (the caller) safely ---
+  Future<String?> _myDisplayName() async {
+    try {
+      final me = _sb.auth.currentUser?.id;
+      if (me == null) return null;
+
+      // public profile first
+      final pubRes = await _sb
+          .from('user_public')
+          .select('display_name, username, full_name, email')
+          .eq('id', me)
+          .maybeSingle();
+
+      final Map<String, dynamic> pub =
+          (pubRes as Map?)?.cast<String, dynamic>() ?? const <String, dynamic>{};
+
+      final pubName = (pub['display_name'] ??
+          pub['username'] ??
+          pub['full_name'] ??
+          pub['email']) as String?;
+      final trimmedPub = pubName?.trim();
+      if (trimmedPub != null && trimmedPub.isNotEmpty) return trimmedPub;
+
+      // fallback to users
+      final usrRes = await _sb
+          .from('users')
+          .select('display_name, email')
+          .eq('id', me)
+          .maybeSingle();
+
+      final Map<String, dynamic> usr =
+          (usrRes as Map?)?.cast<String, dynamic>() ?? const <String, dynamic>{};
+
+      final usrName = (usr['display_name'] ?? usr['email']) as String?;
+      final trimmedUsr = usrName?.trim();
+      if (trimmedUsr != null && trimmedUsr.isNotEmpty) return trimmedUsr;
+    } catch (_) {}
+    return null;
   }
 
   // Chat: resolve/create a 1v1 then open ThreadScreen
   Future<void> _openOrCreate1v1(Map<String, dynamic> contact) async {
     final peerId = contact['id'] as String?;
     if (peerId == null) return;
-    // --- Block Check ---
+
     final blockStatus = await _checkBlockStatus(peerId);
-    if (mounted) { // Check mounted before showing SnackBar
-      if (blockStatus == 'blocked_by_me') {
+    if (mounted) {
+      if (blockStatus == 'blocked') {
         ScaffoldMessenger.of(context).showSnackBar(
           const SnackBar(content: Text('You have blocked this user. Unblock them from the "Blocked Users" screen to chat.')),
         );
@@ -190,7 +227,12 @@ class _ContactsScreenState extends State<ContactsScreen> {
       Navigator.pushNamed(
         context,
         AppRoutes.thread,
-        arguments: ThreadArgs(threadId: tid, title: _titleFor(contact), peerId: peerId, isGroup: false),
+        arguments: ThreadArgs(
+          threadId: tid,
+          title: _titleFor(contact),
+          peerId: peerId,
+          isGroup: false,
+        ),
       );
     } on PostgrestException catch (e) {
       if (e.code == '23505' || (e.message ?? '').toLowerCase().contains('duplicate 1v1')) {
@@ -201,7 +243,12 @@ class _ContactsScreenState extends State<ContactsScreen> {
             Navigator.pushNamed(
               context,
               AppRoutes.thread,
-              arguments: ThreadArgs(threadId: tid, title: _titleFor(contact), peerId: peerId, isGroup: false),
+              arguments: ThreadArgs(
+                threadId: tid,
+                title: _titleFor(contact),
+                peerId: peerId,
+                isGroup: false,
+              ),
             );
             return;
           }
@@ -219,14 +266,13 @@ class _ContactsScreenState extends State<ContactsScreen> {
     }
   }
 
-  // Call via ringing flow (insert invite -> OutgoingCallScreen)
-  // Default is audio-first (video=false)
+  /// Start call via ringing flow (insert invite -> send FCM "call" -> OutgoingCallScreen)
   Future<void> _startCall(Map<String, dynamic> contact, {bool video = false}) async {
     final peerId = contact['id'] as String?;
     if (peerId == null) return;
 
     final blockStatus = await _checkBlockStatus(peerId);
-    if (mounted) { // Check mounted before showing SnackBar
+    if (mounted) {
       if (blockStatus == 'blocked') {
         ScaffoldMessenger.of(context).showSnackBar(
           const SnackBar(content: Text('You have blocked this user. Unblock them to make a call.')),
@@ -255,7 +301,7 @@ class _ContactsScreenState extends State<ContactsScreen> {
       }
       if (tid == null || tid.isEmpty) throw Exception('No thread id');
 
-      // Create invite row (kind reflects audio/video intent at start)
+      // Insert invite row
       final me = _sb.auth.currentUser!.id;
       final inserted = await _sb
           .from('call_invites')
@@ -269,8 +315,20 @@ class _ContactsScreenState extends State<ContactsScreen> {
           .single();
 
       final inviteId = inserted['id'] as String;
-      final title = _titleFor(contact);
 
+      // IMPORTANT: pass **my** name (caller), not the callee's title.
+      final myName = await _myDisplayName() ?? 'AiTalk';
+
+      // Send the data-only FCM so callee shows IncomingCallScreen
+      await calls.CallActions.startCall(
+        threadId: tid,
+        calleeUserId: peerId,
+        video: video,
+        callerName: myName,
+        callId: inviteId,
+      );
+
+      // Navigate to our ringing screen
       if (!mounted) return;
       Navigator.pushNamed(
         context,
@@ -278,8 +336,8 @@ class _ContactsScreenState extends State<ContactsScreen> {
         arguments: OutgoingCallArgs(
           inviteId: inviteId,
           threadId: tid,
-          calleeName: title,
-          video: video, // will be false by default (audio-first)
+          calleeName: _titleFor(contact),
+          video: video,
         ),
       );
     } catch (e) {
@@ -348,7 +406,6 @@ class _ContactsScreenState extends State<ContactsScreen> {
       return;
     }
 
-    // Optional: Confirmation Dialog
     final confirm = await showDialog<bool>(
       context: context,
       builder: (dialogContext) => AlertDialog(
@@ -360,7 +417,7 @@ class _ContactsScreenState extends State<ContactsScreen> {
             onPressed: () => Navigator.pop(dialogContext, false),
           ),
           TextButton(
-            style: TextButton.styleFrom(foregroundColor: Theme.of(context).colorScheme.error), // Use error color for block
+            style: TextButton.styleFrom(foregroundColor: Theme.of(context).colorScheme.error),
             child: const Text('Block'),
             onPressed: () => Navigator.pop(dialogContext, true),
           ),
@@ -376,51 +433,26 @@ class _ContactsScreenState extends State<ContactsScreen> {
         'blocked_user_id': userIdToBlock,
       });
       _snack('$userNameToBlock has been blocked.');
-      // Optional: You might want to refresh some state here if the UI
-      // should immediately change for this contact (e.g., disable chat/call buttons).
-      // For now, the next attempt to chat/call will pick up the block.
-      // Or, if this screen shows an indicator for blocked users, update it.
-      setState(() {}); // Basic refresh to rebuild contact tiles if their state changes
-
+      setState(() {});
     } on PostgrestException catch (e) {
-      if (e.code == '23505') { // Unique constraint violation (already blocked)
+      if (e.code == '23505') {
         _snack('$userNameToBlock is already blocked.');
       } else {
         _snack('Error blocking user: ${e.message}');
       }
-      print('Error blocking user: ${e.toString()}');
-    } catch (e) {
+    } catch (_) {
       _snack('An unexpected error occurred while blocking.');
-      print('Generic error blocking user: ${e.toString()}');
     }
   }
 
   Widget _contactTile(Map<String, dynamic> c) {
     final title = _titleFor(c);
-    final email = (c['email'] as String?) ?? '';
     final contactId = c['id'] as String? ?? '';
-
-    /*final deleteBtn = IconButton(
-      tooltip: 'Delete',
-      onPressed: () => _deleteContact(contactId),
-      icon: const Icon(Icons.delete_outline),
-      style: IconButton.styleFrom(
-        backgroundColor: const Color(0xFF0E141C),
-        foregroundColor: Theme.of(context).colorScheme.error,
-      ),
-    );
-
-    final blockBtn = IconButton(
-      tooltip: 'Block User',
-      icon: const Icon(Icons.block, color: Colors.orangeAccent), // Or another distinct color
-      onPressed: () => _initiateBlockUser(contactId, title),
-    );*/
 
     return Card(
       child: ListTile(
         leading: Avatar(name: title),
         title: Text(title, maxLines: 1, overflow: TextOverflow.ellipsis),
-        //subtitle: Text(email, maxLines: 1, overflow: TextOverflow.ellipsis),
         trailing: Wrap(spacing: 8, children: [
           IconButton(
             tooltip: 'Message',
@@ -428,18 +460,15 @@ class _ContactsScreenState extends State<ContactsScreen> {
             color: Colors.blue,
             onPressed: () => _openOrCreate1v1(c),
           ),
-          // AUDIO-FIRST: phone icon starts audio call (video: false)
+          // AUDIO-first call
           IconButton(
             tooltip: 'Call',
             icon: const Icon(Icons.call_outlined),
             color: Colors.blue,
             onPressed: () => _startCall(c, video: false),
-            // (Optional) long-press could open a sheet for "Start with video"
           ),
-          //blockBtn,
-          //deleteBtn,
           PopupMenuButton<String>(
-            icon: const Icon(Icons.more_vert, color: Colors.blue,),
+            icon: const Icon(Icons.more_vert, color: Colors.blue),
             tooltip: "More options",
             onSelected: (value) {
               if (value == 'block') {
@@ -448,14 +477,20 @@ class _ContactsScreenState extends State<ContactsScreen> {
                 _deleteContact(contactId);
               }
             },
-            itemBuilder: (BuildContext context) => <PopupMenuEntry<String>>[
-              const PopupMenuItem<String>(
-                value: 'block', // You'll need logic to show "Unblock" if already blocked
-                child: ListTile(leading: Icon(Icons.block, color: Colors.orangeAccent), title: Text('Block User')),
+            itemBuilder: (BuildContext context) => const <PopupMenuEntry<String>>[
+              PopupMenuItem<String>(
+                value: 'block',
+                child: ListTile(
+                  leading: Icon(Icons.block, color: Colors.orangeAccent),
+                  title: Text('Block User'),
+                ),
               ),
-              const PopupMenuItem<String>(
+              PopupMenuItem<String>(
                 value: 'delete',
-                child: ListTile(leading: Icon(Icons.delete_outline, color: Colors.red), title: Text('Delete Contact')),
+                child: ListTile(
+                  leading: Icon(Icons.delete_outline, color: Colors.red),
+                  title: Text('Delete Contact'),
+                ),
               ),
             ],
           ),
@@ -476,7 +511,7 @@ class _ContactsScreenState extends State<ContactsScreen> {
           IconButton(
             tooltip: 'Blocked Users',
             icon: const Icon(Icons.app_blocking),
-            onPressed: (){
+            onPressed: () {
               Navigator.pushNamed(context, AppRoutes.blockedUsers);
             },
           ),
