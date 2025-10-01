@@ -38,7 +38,12 @@ class _ChatsScreenState extends State<ChatsScreen> {
   @override
   void initState() {
     super.initState();
-    //_load();
+
+    // 👇 Print the user JWT to the Run/Debug console (use this for AUTH_BEARER)
+    final jwt = _sb.auth.currentSession?.accessToken;
+    // Use debugPrint to avoid truncation of long lines
+    debugPrint('[JWT] $jwt');
+
     _loadAllChatData();
     _loadBannerAd();
   }
@@ -95,26 +100,25 @@ class _ChatsScreenState extends State<ChatsScreen> {
       if (mounted) {
         final ids = (response as List?)
             ?.map((item) => item['blocked_user_id'] as String)
-            .where((id) => id.isNotEmpty) // Ensure no empty strings if possible
+            .where((id) => id.isNotEmpty)
             .toSet();
         setState(() {
           _blockedByUserIds = ids ?? {};
         });
-        print("DEBUG: ChatsScreen - Blocked User IDs: $_blockedByUserIds");
+        // Debug
+        debugPrint("DEBUG: ChatsScreen - Blocked User IDs: $_blockedByUserIds");
       }
     } catch (e) {
       if (mounted) {
         setState(() {
           _blockedByUserIds = {}; // Reset on error
         });
-        print("Error fetching blocked user IDs: $e");
-        // Optionally show a snackbar, but maybe fail silently for this background fetch
+        debugPrint("Error fetching blocked user IDs: $e");
       }
     }
   }
 
   Future<void> _loadThreadsAndPreviews() async {
-    //setState(() => _loading = true);
     try {
       // 1) server-side list (expects columns from the updated list_threads())
       final res = await _sb.rpc('list_threads');
@@ -134,9 +138,7 @@ class _ChatsScreenState extends State<ChatsScreen> {
     } catch (e) {
       if (!mounted) return;
       _snack('Failed to load chats: $e');
-    } //finally {
-      //if (mounted) setState(() => _loading = false);
-    //}
+    }
   }
 
   Future<void> _loadCutoffs() async {
@@ -161,7 +163,7 @@ class _ChatsScreenState extends State<ChatsScreen> {
     final title = (row['display_name_for_list'] as String?)?.trim();
     if (title != null && title.isNotEmpty) return title;
 
-    // Fallbacks if RPC didn’t populate (shouldn’t happen with the updated SQL)
+    // Fallbacks if RPC didn’t populate
     final isGroup = row['is_group'] == true;
     return isGroup ? 'Group' : 'User';
   }
@@ -180,17 +182,16 @@ class _ChatsScreenState extends State<ChatsScreen> {
       String defaultpreview = 'Say hi 👋';
       String finalPreview;
 
-      //Block check
+      // Block check
       if (!isGroup && peerId != null && _blockedByUserIds.contains(peerId)) {
-        finalPreview = 'You blocked this user'; // Or "Interaction disabled"
+        finalPreview = 'You blocked this user';
         _previews[tid] = finalPreview;
-        continue; // Skip fetching messages for preview if blocked
+        continue;
       }
 
       try {
         final cutoff = _cutoffs[tid];
 
-        // Build the query with filters first, then order/limit
         var q = _sb
             .from('messages')
             .select('id, body, kind, deleted_at, created_at')
@@ -225,12 +226,7 @@ class _ChatsScreenState extends State<ChatsScreen> {
 
           final messageSenderId = m['sender_id'] as String?;
           if (!isGroup && peerId != null && _blockedByUserIds.contains(peerId) && messageSenderId == peerId) {
-            // If we are here, it means the top-level block check didn't catch it,
-            // which implies _blockedByUserIds might have updated.
-            // We should use the "You blocked this user" message.
-            // However, the `continue` above should prevent this inner loop mostly.
-            // For safety, let's keep a simpler preview if a blocked user's message is somehow processed here.
-            chosen = 'Interaction disabled'; // Or some other generic message
+            chosen = 'Interaction disabled';
             break;
           }
 
@@ -383,8 +379,6 @@ class _ChatsScreenState extends State<ChatsScreen> {
               child: ListTile(
                 leading: Avatar(
                   name: title,
-                  // If your Avatar supports a url prop, you can pass:
-                  // url: row['item_avatar_url'] as String?,
                 ),
                 title: Text(
                   title,
@@ -395,13 +389,13 @@ class _ChatsScreenState extends State<ChatsScreen> {
                   ),
                 ),
                 subtitle: Text(
-                    subtitle,
-                    maxLines: 1,
-                    overflow: TextOverflow.ellipsis,
-                    style: TextStyle(
-                      fontStyle: isPeerChatBlocked ? FontStyle.italic : FontStyle.normal,
-                      color: isPeerChatBlocked ? Colors.grey.shade700 : null,
-                    ),
+                  subtitle,
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                  style: TextStyle(
+                    fontStyle: isPeerChatBlocked ? FontStyle.italic : FontStyle.normal,
+                    color: isPeerChatBlocked ? Colors.grey.shade700 : null,
+                  ),
                 ),
                 onTap: () => _openThread(row),
                 trailing: PopupMenuButton<String>(
