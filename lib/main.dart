@@ -1,14 +1,14 @@
+// lib/main.dart
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_dotenv/flutter_dotenv.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
+
 import 'core/env.dart';
 import 'core/app_theme.dart';
 import 'core/app_routes.dart';
 import 'core/push_service.dart';
-
-// A global navigator so PushService.onOpenRoute can push named routes from anywhere.
-final GlobalKey<NavigatorState> navigatorKey = GlobalKey<NavigatorState>();
+import 'core/push_route_handler.dart'; // pushNavKey + handlePushRoute
 
 Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
@@ -21,14 +21,11 @@ Future<void> main() async {
     anonKey: Env.supabaseAnonKey,
   );
 
-  // ✅ Initialize push once, with deep-link handler
+  // Initialize FCM/local notifications and wire deep links
   await PushService.init(
-    onOpenRoute: (route) {
-      // Expecting routes like: /incoming_call?callId=...&thread=...
-      navigatorKey.currentState?.pushNamed(route);
-    },
+    onOpenRoute: handlePushRoute, // parses "/call" and "/thread/<id>"
     onForegroundMessage: (_) {
-      // no banner for messages in-foreground; refresh UI/badge if you want
+      // No system banner for foreground messages; update badges/UI if desired.
     },
   );
 
@@ -56,7 +53,7 @@ class AiTalkApp extends StatelessWidget {
       themeMode: ThemeMode.dark,
       onGenerateRoute: AppRoutes.onGenerateRoute,
       initialRoute: AppRoutes.splash,
-      navigatorKey: navigatorKey, // ✅ allow PushService to navigate
+      navigatorKey: pushNavKey, // global key used by push route handler
     );
   }
 }

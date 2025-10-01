@@ -14,8 +14,10 @@ import 'package:path_provider/path_provider.dart';
 import 'package:share_plus/share_plus.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
 import 'package:url_launcher/url_launcher.dart';
+import 'package:supabase_flutter/supabase_flutter.dart';
 
 import '../../core/app_routes.dart';
+import '../../core/call_actions.dart'; // 🔔 send FCM call push
 import 'outgoing_call_screen.dart' show OutgoingCallArgs;
 import '../widgets/chat_input_bar.dart';
 import 'group_room_screen.dart';
@@ -87,7 +89,7 @@ class _ThreadScreenState extends State<ThreadScreen> {
     _loadInitialScreenData();
   }
 
-  Future<void> _loadInitialScreenData() async{
+  Future<void> _loadInitialScreenData() async {
     // Set loading true for the whole screen if needed
     if (!widget.args.isGroup && _peerId != null) {
       await _checkInitialBlockStatus(); // Wait for block status
@@ -142,8 +144,7 @@ class _ThreadScreenState extends State<ThreadScreen> {
         });
       }
     } catch (e) {
-      print("Error checking initial block status in ThreadScreen: $e");
-      // _snack("Could not verify block status.", isError: true); // Optional
+      // ignore
     }
   }
 
@@ -177,7 +178,8 @@ class _ThreadScreenState extends State<ThreadScreen> {
       return;
     }
     if (_amIBlockedByPeer) {
-      _snack('You cannot block this user as they have blocked you.', isError: true);
+      _snack('You cannot block this user as they have blocked you.',
+          isError: true);
       return;
     }
 
@@ -185,11 +187,15 @@ class _ThreadScreenState extends State<ThreadScreen> {
       context: context,
       builder: (dialogContext) => AlertDialog(
         title: Text('Block $peerName?'),
-        content: Text('You will no longer see their posts. They will not be able to call or message you. This chat will become read-only. Unblock from "Blocked Users" screen.'),
+        content: const Text(
+            'You will no longer see their posts. They will not be able to call or message you. This chat will become read-only. Unblock from "Blocked Users" screen.'),
         actions: <Widget>[
-          TextButton(child: const Text('Cancel'), onPressed: () => Navigator.pop(dialogContext, false)),
           TextButton(
-            style: TextButton.styleFrom(foregroundColor: Theme.of(context).colorScheme.error),
+              child: const Text('Cancel'),
+              onPressed: () => Navigator.pop(dialogContext, false)),
+          TextButton(
+            style: TextButton.styleFrom(
+                foregroundColor: Theme.of(context).colorScheme.error),
             child: const Text('Block'),
             onPressed: () => Navigator.pop(dialogContext, true),
           ),
@@ -205,13 +211,19 @@ class _ThreadScreenState extends State<ThreadScreen> {
         'blocked_user_id': peerIdToBlock,
       });
       if (mounted) {
-        setState(() { _isPeerBlockedByMe = true; });
+        setState(() {
+          _isPeerBlockedByMe = true;
+        });
         _snack('$peerName has been blocked.');
         _load();
       }
     } on PostgrestException catch (e) {
       if (e.code == '23505') {
-        if (mounted) { setState(() { _isPeerBlockedByMe = true; }); }
+        if (mounted) {
+          setState(() {
+            _isPeerBlockedByMe = true;
+          });
+        }
         _snack('$peerName is already blocked.');
       } else {
         _snack('Error blocking user: ${e.message}', isError: true);
@@ -232,14 +244,15 @@ class _ThreadScreenState extends State<ThreadScreen> {
       return;
     }
 
-    // Optional: Add confirmation dialog for unblocking too
-
     try {
-      await _sb.from('user_blocks')
+      await _sb
+          .from('user_blocks')
           .delete()
           .match({'blocker_user_id': currentUserId, 'blocked_user_id': peerIdToUnblock});
-      if(mounted){
-        setState(() { _isPeerBlockedByMe = false; });
+      if (mounted) {
+        setState(() {
+          _isPeerBlockedByMe = false;
+        });
         _snack('$peerName has been unblocked.');
         _load();
       }
@@ -269,12 +282,12 @@ class _ThreadScreenState extends State<ThreadScreen> {
 
       final rows = await q.order('created_at', ascending: true);
 
-      List<Map<String, dynamic>> fetchedMessages = (rows as List).cast<Map<String, dynamic>>();
+      List<Map<String, dynamic>> fetchedMessages =
+      (rows as List).cast<Map<String, dynamic>>();
 
       List<Map<String, dynamic>> messagesToDisplay = List.from(fetchedMessages);
 
-      if (!_isGroup && _isPeerBlockedByMe && _peerId != null) { // Added !_isGroup check for safety
-        print('DEBUG: _load - Filtering historical messages because peer $_peerId is blocked by me.');
+      if (!_isGroup && _isPeerBlockedByMe && _peerId != null) {
         messagesToDisplay.removeWhere((msg) {
           final messageSenderId = msg['sender_id'] as String?;
           return messageSenderId == _peerId;
@@ -319,7 +332,11 @@ class _ThreadScreenState extends State<ThreadScreen> {
     _members.clear();
     _ownerId = null;
     try {
-      final t = await _sb.from('threads').select('created_by').eq('id', _tid).maybeSingle();
+      final t = await _sb
+          .from('threads')
+          .select('created_by')
+          .eq('id', _tid)
+          .maybeSingle();
       _ownerId = t?['created_by'] as String?;
 
       final memRows =
@@ -371,12 +388,8 @@ class _ThreadScreenState extends State<ThreadScreen> {
         ),
         callback: (payload) {
           final newMsgMap = payload.newRecord;
-          if (newMsgMap == null || newMsgMap.isEmpty) {
-            print('DEBUG: Sub - Received empty new message payload.');
-            return;
-          }
+          if (newMsgMap == null || newMsgMap.isEmpty) return;
 
-          print('DEBUG: Sub - Raw new message payload: $newMsgMap');
           final createdAtStr = newMsgMap['created_at'] as String?;
           if (_cutoff != null &&
               createdAtStr != null &&
@@ -386,22 +399,17 @@ class _ThreadScreenState extends State<ThreadScreen> {
           }
           final messageSenderId = newMsgMap['sender_id'] as String?;
 
-          if (!_isGroup && _isPeerBlockedByMe && _peerId != null && messageSenderId == _peerId) { // Added !_isGroup
-            print('DEBUG: Sub - Received message from blocked peer $_peerId. Hiding it. Message ID: ${newMsgMap['id']}');
-            return; // << CRITICAL: Correctly returning without adding/processing
+          if (!_isGroup &&
+              _isPeerBlockedByMe &&
+              _peerId != null &&
+              messageSenderId == _peerId) {
+            return;
           }
-          // ---- >>> FILTERING LOGIC ENDS HERE <<< ----
 
-          // Add the message to the UI list
-          // Ensure the map structure is what your UI expects
           final messageForUi = Map<String, dynamic>.from(newMsgMap);
-
           if (mounted) {
             setState(() {
               _messages.add(messageForUi);
-              // You might need to re-sort if your list isn't always naturally ordered
-              // Or if your _load() orders differently than inserts.
-              // For simplicity, adding to end and relying on _scrollToBottomSoon.
             });
             _scrollToBottomSoon();
           }
@@ -604,7 +612,8 @@ class _ThreadScreenState extends State<ThreadScreen> {
   }
 
   /// Updatable-label variant (kept for other cases).
-  VoidCallback _showBusyOverlayVN(ValueNotifier<String> labelVN, {bool top = false}) {
+  VoidCallback _showBusyOverlayVN(ValueNotifier<String> labelVN,
+      {bool top = false}) {
     final overlay = Overlay.of(context);
     late OverlayEntry entry;
 
@@ -636,8 +645,8 @@ class _ThreadScreenState extends State<ThreadScreen> {
                     const SizedBox(width: 12),
                     ValueListenableBuilder<String>(
                       valueListenable: labelVN,
-                      builder: (_, text, __) =>
-                          Text(text, style: Theme.of(context).textTheme.titleMedium),
+                      builder: (_, text, __) => Text(text,
+                          style: Theme.of(context).textTheme.titleMedium),
                     ),
                   ],
                 ),
@@ -672,14 +681,14 @@ class _ThreadScreenState extends State<ThreadScreen> {
       await _sb.functions.invoke(
         'send_push_users',
         body: {
-          'threadId': _tid,              // server finds all members of this thread
-          'fromUserId': me,              // sender (server excludes this id)
-          'preview': preview,            // becomes notification body
-          if (senderName != null) 'senderName': senderName,  // server will also look up if omitted
+          'threadId': _tid, // server finds all members of this thread
+          'fromUserId': me, // sender (server excludes this id)
+          'preview': preview, // becomes notification body
+          if (senderName != null) 'senderName': senderName, // optional
           'route': '/thread/$_tid',
           'data': {
             'threadId': _tid,
-            'senderId': me,              // client-side guard to ignore self in foreground
+            'senderId': me, // client-side guard to ignore self in foreground
           },
           'pruneInvalid': true,
         },
@@ -713,7 +722,8 @@ class _ThreadScreenState extends State<ThreadScreen> {
 
       // 🔔 Notify recipients with a short preview
       final preview = text.trim().replaceAll('\n', ' ');
-      await _notifyRecipients(preview: preview.length > 80 ? '${preview.substring(0, 80)}…' : preview);
+      await _notifyRecipients(
+          preview: preview.length > 80 ? '${preview.substring(0, 80)}…' : preview);
     } catch (e) {
       _snack('Send failed: $e');
     } finally {
@@ -940,9 +950,8 @@ class _ThreadScreenState extends State<ThreadScreen> {
           .select('id, display_name, email, avatar_url')
           .or(orClause);
 
-      final items = (profs as List)
-          .map((p) => Map<String, dynamic>.from(p as Map))
-          .toList();
+      final items =
+      (profs as List).map((p) => Map<String, dynamic>.from(p as Map)).toList();
 
       final selected = <String>{};
 
@@ -961,7 +970,8 @@ class _ThreadScreenState extends State<ThreadScreen> {
                 itemBuilder: (_, i) {
                   final u = items[i];
                   final id = u['id'] as String;
-                  final dn = ((u['display_name'] as String?)?.trim().isNotEmpty == true)
+                  final dn = ((u['display_name'] as String?)?.trim().isNotEmpty ==
+                      true)
                       ? u['display_name'] as String
                       : ((u['email'] as String?) ?? 'User');
                   final initial = dn.isNotEmpty ? dn[0].toUpperCase() : 'U';
@@ -993,7 +1003,9 @@ class _ThreadScreenState extends State<ThreadScreen> {
               ),
             ),
             actions: [
-              TextButton(onPressed: () => Navigator.pop(context, false), child: const Text('Cancel')),
+              TextButton(
+                  onPressed: () => Navigator.pop(context, false),
+                  child: const Text('Cancel')),
               FilledButton(
                 onPressed: () => Navigator.pop(context, true),
                 child: const Text('Add'),
@@ -1006,17 +1018,21 @@ class _ThreadScreenState extends State<ThreadScreen> {
       if (ok != true || selected.isEmpty) return;
 
       // Insert members (ignore existing via conflict target)
-      final rows = selected.map((uid) => {
+      final rows = selected
+          .map((uid) => {
         'thread_id': _tid,
         'user_id': uid,
-      }).toList();
+      })
+          .toList();
 
       await _sb
           .from('thread_members')
           .upsert(rows, onConflict: 'thread_id,user_id');
 
       if (_isGroup) await _loadMembers();
-      if (mounted) _snack('Added ${selected.length} member${selected.length == 1 ? '' : 's'}.');
+      if (mounted) {
+        _snack('Added ${selected.length} member${selected.length == 1 ? '' : 's'}.');
+      }
     } on PostgrestException catch (e) {
       _snack(e.message);
     } catch (e) {
@@ -1033,8 +1049,11 @@ class _ThreadScreenState extends State<ThreadScreen> {
           'p_user_id': userId,
         });
       } catch (_) {
-        await _sb.from('thread_members').delete()
-            .eq('thread_id', _tid).eq('user_id', userId);
+        await _sb
+            .from('thread_members')
+            .delete()
+            .eq('thread_id', _tid)
+            .eq('user_id', userId);
       }
       await _loadMembers();
       if (mounted) setState(() {});
@@ -1053,8 +1072,12 @@ class _ThreadScreenState extends State<ThreadScreen> {
         title: const Text('Leave group?'),
         content: const Text('You will stop receiving messages from this group.'),
         actions: [
-          TextButton(onPressed: () => Navigator.pop(context, false), child: const Text('Cancel')),
-          FilledButton(onPressed: () => Navigator.pop(context, true), child: const Text('Leave')),
+          TextButton(
+              onPressed: () => Navigator.pop(context, false),
+              child: const Text('Cancel')),
+          FilledButton(
+              onPressed: () => Navigator.pop(context, true),
+              child: const Text('Leave')),
         ],
       ),
     );
@@ -1082,8 +1105,12 @@ class _ThreadScreenState extends State<ThreadScreen> {
           decoration: const InputDecoration(hintText: 'Group name'),
         ),
         actions: [
-          TextButton(onPressed: () => Navigator.pop(context, false), child: const Text('Cancel')),
-          FilledButton(onPressed: () => Navigator.pop(context, true), child: const Text('Save')),
+          TextButton(
+              onPressed: () => Navigator.pop(context, false),
+              child: const Text('Cancel')),
+          FilledButton(
+              onPressed: () => Navigator.pop(context, true),
+              child: const Text('Save')),
         ],
       ),
     );
@@ -1093,7 +1120,8 @@ class _ThreadScreenState extends State<ThreadScreen> {
 
     try {
       try {
-        await _sb.rpc('rename_group', params: {'p_thread_id': _tid, 'p_name': newName});
+        await _sb
+            .rpc('rename_group', params: {'p_thread_id': _tid, 'p_name': newName});
       } catch (_) {
         await _sb.from('threads').update({'name': newName}).eq('id', _tid);
       }
@@ -1131,7 +1159,8 @@ class _ThreadScreenState extends State<ThreadScreen> {
 
       final res = await Dio().get<List<int>>(
         url,
-        options: Options(responseType: ResponseType.bytes, followRedirects: true),
+        options:
+        Options(responseType: ResponseType.bytes, followRedirects: true),
         cancelToken: cancelToken,
         onReceiveProgress: (received, total) {
           if (!mounted) return;
@@ -1223,7 +1252,6 @@ class _ThreadScreenState extends State<ThreadScreen> {
       return true;
     }).toList();
 
-
     return Scaffold(
       appBar: AppBar(
         title: Text(_title),
@@ -1268,7 +1296,8 @@ class _ThreadScreenState extends State<ThreadScreen> {
                 items.add(
                   PopupMenuItem<String>(
                     value: 'block_toggle',
-                    child: Text(_isPeerBlockedByMe ? 'Unblock ${_title}' : 'Block ${_title}'),
+                    child: Text(
+                        _isPeerBlockedByMe ? 'Unblock ${_title}' : 'Block ${_title}'),
                   ),
                 );
               }
@@ -1290,7 +1319,6 @@ class _ThreadScreenState extends State<ThreadScreen> {
       ),
       body: Column(
         children: [
-
           Expanded(
             child: _loading
                 ? const Center(child: CircularProgressIndicator())
@@ -1320,7 +1348,7 @@ class _ThreadScreenState extends State<ThreadScreen> {
                 if (raw is String) ts = DateTime.tryParse(raw) ?? ts;
                 else if (raw is DateTime) ts = raw;
 
-                // 1) Map preview (from columns or maps URL)
+                // 1) Map preview
                 final latCol = (m['location_lat'] as num?)?.toDouble();
                 final lngCol = (m['location_lng'] as num?)?.toDouble();
                 LatLng? point;
@@ -1335,7 +1363,8 @@ class _ThreadScreenState extends State<ThreadScreen> {
                   final mapsUrl =
                       'https://www.google.com/maps/search/?api=1&query=${point.latitude},${point.longitude}';
                   return Align(
-                    alignment: isMe ? Alignment.centerRight : Alignment.centerLeft,
+                    alignment:
+                    isMe ? Alignment.centerRight : Alignment.centerLeft,
                     child: ConstrainedBox(
                       constraints: const BoxConstraints(maxWidth: 320),
                       child: Column(
@@ -1343,7 +1372,8 @@ class _ThreadScreenState extends State<ThreadScreen> {
                         children: [
                           if (showName)
                             Padding(
-                              padding: const EdgeInsets.only(left: 8, bottom: 2),
+                              padding:
+                              const EdgeInsets.only(left: 8, bottom: 2),
                               child: Text(
                                 _displayName(senderId),
                                 style: TextStyle(
@@ -1354,14 +1384,17 @@ class _ThreadScreenState extends State<ThreadScreen> {
                               ),
                             ),
                           Card(
-                            margin: const EdgeInsets.symmetric(vertical: 6, horizontal: 6),
+                            margin: const EdgeInsets.symmetric(
+                                vertical: 6, horizontal: 6),
                             clipBehavior: Clip.antiAlias,
-                            shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(14)),
+                            shape: RoundedRectangleBorder(
+                                borderRadius: BorderRadius.circular(14)),
                             child: InkWell(
                               onTap: () => _openUrl(mapsUrl),
                               onLongPress: () => _showMessageActions(m),
                               child: Column(
-                                crossAxisAlignment: CrossAxisAlignment.stretch,
+                                crossAxisAlignment:
+                                CrossAxisAlignment.stretch,
                                 children: [
                                   SizedBox(
                                     height: 160,
@@ -1369,7 +1402,8 @@ class _ThreadScreenState extends State<ThreadScreen> {
                                       options: MapOptions(
                                         initialCenter: point,
                                         initialZoom: 15,
-                                        interactionOptions: const InteractionOptions(
+                                        interactionOptions:
+                                        const InteractionOptions(
                                           flags: InteractiveFlag.none,
                                         ),
                                       ),
@@ -1378,8 +1412,14 @@ class _ThreadScreenState extends State<ThreadScreen> {
                                         TileLayer(
                                           urlTemplate:
                                           'https://{s}.basemaps.cartocdn.com/light_all/{z}/{x}/{y}{r}.png',
-                                          subdomains: const ['a', 'b', 'c', 'd'],
-                                          userAgentPackageName: 'com.yourcompany.yourapp',
+                                          subdomains: const [
+                                            'a',
+                                            'b',
+                                            'c',
+                                            'd'
+                                          ],
+                                          userAgentPackageName:
+                                          'com.yourcompany.yourapp',
                                         ),
                                         MarkerLayer(markers: [
                                           Marker(
@@ -1397,8 +1437,11 @@ class _ThreadScreenState extends State<ThreadScreen> {
                                     ),
                                   ),
                                   Container(
-                                    color: Theme.of(context).colorScheme.surface,
-                                    padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+                                    color: Theme.of(context)
+                                        .colorScheme
+                                        .surface,
+                                    padding: const EdgeInsets.symmetric(
+                                        horizontal: 12, vertical: 8),
                                     child: Row(
                                       children: [
                                         const Icon(Icons.map, size: 18),
@@ -1406,17 +1449,24 @@ class _ThreadScreenState extends State<ThreadScreen> {
                                         Expanded(
                                           child: Text(
                                             'Open in Google Maps',
-                                            overflow: TextOverflow.ellipsis,
+                                            overflow:
+                                            TextOverflow.ellipsis,
                                             style: TextStyle(
-                                              decoration: TextDecoration.underline,
-                                              color: Theme.of(context).colorScheme.primary,
+                                              decoration: TextDecoration
+                                                  .underline,
+                                              color: Theme.of(context)
+                                                  .colorScheme
+                                                  .primary,
                                               fontWeight: FontWeight.w600,
                                             ),
                                           ),
                                         ),
                                         Text(
                                           timeOfDay(ts),
-                                          style: TextStyle(fontSize: 11, color: Colors.grey.shade600),
+                                          style: TextStyle(
+                                              fontSize: 11,
+                                              color:
+                                              Colors.grey.shade600),
                                         ),
                                       ],
                                     ),
@@ -1433,7 +1483,8 @@ class _ThreadScreenState extends State<ThreadScreen> {
 
                 // 2) File/media message card (URL with extension)
                 final isLink = !deleted && _isUrl(body);
-                final looksFile = isLink && _ext(_fileNameFromUrl(body)).isNotEmpty;
+                final looksFile =
+                    isLink && _ext(_fileNameFromUrl(body)).isNotEmpty;
 
                 if (!deleted && looksFile) {
                   final name = _fileNameFromUrl(body);
@@ -1457,7 +1508,8 @@ class _ThreadScreenState extends State<ThreadScreen> {
                         errorBuilder: (_, __, ___) => Container(
                           height: 180,
                           color: Colors.grey.shade300,
-                          child: const Center(child: Icon(Icons.broken_image)),
+                          child:
+                          const Center(child: Icon(Icons.broken_image)),
                         ),
                       ),
                     );
@@ -1473,7 +1525,8 @@ class _ThreadScreenState extends State<ThreadScreen> {
                             child: CircleAvatar(
                               radius: 28,
                               backgroundColor: Colors.black45,
-                              child: Icon(Icons.play_arrow, color: Colors.white, size: 34),
+                              child: Icon(Icons.play_arrow,
+                                  color: Colors.white, size: 34),
                             ),
                           ),
                         ],
@@ -1485,14 +1538,16 @@ class _ThreadScreenState extends State<ThreadScreen> {
                       child: Row(
                         crossAxisAlignment: CrossAxisAlignment.start,
                         children: [
-                          const Icon(Icons.insert_drive_file_outlined, size: 24),
+                          const Icon(Icons.insert_drive_file_outlined,
+                              size: 24),
                           const SizedBox(width: 10),
                           Expanded(
                             child: Text(
                               name,
                               maxLines: 2,
                               overflow: TextOverflow.ellipsis,
-                              style: const TextStyle(fontWeight: FontWeight.w600),
+                              style: const TextStyle(
+                                  fontWeight: FontWeight.w600),
                             ),
                           ),
                         ],
@@ -1501,7 +1556,8 @@ class _ThreadScreenState extends State<ThreadScreen> {
                   }
 
                   return Align(
-                    alignment: isMe ? Alignment.centerRight : Alignment.centerLeft,
+                    alignment:
+                    isMe ? Alignment.centerRight : Alignment.centerLeft,
                     child: ConstrainedBox(
                       constraints: const BoxConstraints(maxWidth: 320),
                       child: Column(
@@ -1509,7 +1565,8 @@ class _ThreadScreenState extends State<ThreadScreen> {
                         children: [
                           if (showName)
                             Padding(
-                              padding: const EdgeInsets.only(left: 8, bottom: 2),
+                              padding:
+                              const EdgeInsets.only(left: 8, bottom: 2),
                               child: Text(
                                 _displayName(senderId),
                                 style: TextStyle(
@@ -1520,36 +1577,48 @@ class _ThreadScreenState extends State<ThreadScreen> {
                               ),
                             ),
                           Card(
-                            margin: const EdgeInsets.symmetric(vertical: 6, horizontal: 6),
+                            margin: const EdgeInsets.symmetric(
+                                vertical: 6, horizontal: 6),
                             clipBehavior: Clip.antiAlias,
                             child: InkWell(
                               onLongPress: () => _showMessageActions(m),
                               // Open videos/images inside the app
                               onTap: () => isVid
                                   ? _openVideo(body, title: name)
-                                  : (isImg ? _openImage(body, title: name) : _openUrl(body)),
+                                  : (isImg
+                                  ? _openImage(body, title: name)
+                                  : _openUrl(body)),
                               borderRadius: BorderRadius.circular(12),
                               child: Column(
-                                crossAxisAlignment: CrossAxisAlignment.start,
+                                crossAxisAlignment:
+                                CrossAxisAlignment.start,
                                 children: [
                                   header,
                                   const SizedBox(height: 8),
                                   Padding(
-                                    padding: const EdgeInsets.fromLTRB(12, 0, 12, 12),
+                                    padding: const EdgeInsets.fromLTRB(
+                                        12, 0, 12, 12),
                                     child: downloading
                                         ? Column(
                                       children: [
-                                        LinearProgressIndicator(value: prog == 0 ? null : prog),
+                                        LinearProgressIndicator(
+                                            value:
+                                            prog == 0 ? null : prog),
                                         const SizedBox(height: 8),
                                         Row(
                                           children: [
                                             Text('$pct%',
-                                                style: Theme.of(context).textTheme.labelMedium),
+                                                style: Theme.of(context)
+                                                    .textTheme
+                                                    .labelMedium),
                                             const Spacer(),
                                             TextButton.icon(
-                                              icon: const Icon(Icons.close),
-                                              label: const Text('Cancel'),
-                                              onPressed: () => _cancelDownload(mid),
+                                              icon: const Icon(
+                                                  Icons.close),
+                                              label:
+                                              const Text('Cancel'),
+                                              onPressed: () =>
+                                                  _cancelDownload(mid),
                                             ),
                                           ],
                                         ),
@@ -1558,24 +1627,32 @@ class _ThreadScreenState extends State<ThreadScreen> {
                                         : Row(
                                       children: [
                                         _iconPill(
-                                          icon: Icons.download_rounded,
+                                          icon: Icons
+                                              .download_rounded,
                                           tooltip: 'Download',
-                                          onPressed: () => _startDownload(
-                                            messageId: mid,
-                                            url: body,
-                                            suggestedName: name,
-                                          ),
+                                          onPressed: () =>
+                                              _startDownload(
+                                                messageId: mid,
+                                                url: body,
+                                                suggestedName: name,
+                                              ),
                                         ),
                                         const SizedBox(width: 6),
                                         _iconPill(
-                                          icon: Icons.share_outlined,
+                                          icon:
+                                          Icons.share_outlined,
                                           tooltip: 'Share',
-                                          onPressed: () => Share.share(body, subject: name),
+                                          onPressed: () => Share.share(
+                                              body,
+                                              subject: name),
                                         ),
                                         const Spacer(),
                                         Text(
                                           timeOfDay(ts),
-                                          style: TextStyle(fontSize: 11, color: Colors.grey.shade600),
+                                          style: TextStyle(
+                                              fontSize: 11,
+                                              color: Colors
+                                                  .grey.shade600),
                                         ),
                                       ],
                                     ),
@@ -1593,10 +1670,13 @@ class _ThreadScreenState extends State<ThreadScreen> {
                 // 3) Regular text bubble (includes link-only messages)
                 final Color? textColor = deleted
                     ? Colors.grey.shade600
-                    : (isLink ? Theme.of(context).colorScheme.primary : null);
+                    : (isLink
+                    ? Theme.of(context).colorScheme.primary
+                    : null);
 
                 return Align(
-                  alignment: isMe ? Alignment.centerRight : Alignment.centerLeft,
+                  alignment:
+                  isMe ? Alignment.centerRight : Alignment.centerLeft,
                   child: ConstrainedBox(
                     constraints: const BoxConstraints(maxWidth: 320),
                     child: Column(
@@ -1604,7 +1684,8 @@ class _ThreadScreenState extends State<ThreadScreen> {
                       children: [
                         if (showName)
                           Padding(
-                            padding: const EdgeInsets.only(left: 8, bottom: 2),
+                            padding:
+                            const EdgeInsets.only(left: 8, bottom: 2),
                             child: Text(
                               _displayName(senderId),
                               style: TextStyle(
@@ -1615,8 +1696,13 @@ class _ThreadScreenState extends State<ThreadScreen> {
                             ),
                           ),
                         Card(
-                          color: isMe ? Theme.of(context).colorScheme.primaryContainer : null,
-                          margin: const EdgeInsets.symmetric(vertical: 4, horizontal: 6),
+                          color: isMe
+                              ? Theme.of(context)
+                              .colorScheme
+                              .primaryContainer
+                              : null,
+                          margin: const EdgeInsets.symmetric(
+                              vertical: 4, horizontal: 6),
                           child: InkWell(
                             onLongPress: () => _showMessageActions(m),
                             onTap: isLink ? () => _openUrl(body) : null,
@@ -1624,21 +1710,28 @@ class _ThreadScreenState extends State<ThreadScreen> {
                             child: Padding(
                               padding: const EdgeInsets.all(12),
                               child: Column(
-                                crossAxisAlignment: CrossAxisAlignment.start,
+                                crossAxisAlignment:
+                                CrossAxisAlignment.start,
                                 children: [
                                   Text(
                                     deleted ? 'Message deleted' : body,
                                     style: TextStyle(
                                       fontSize: 15,
-                                      fontStyle: deleted ? FontStyle.italic : FontStyle.normal,
+                                      fontStyle: deleted
+                                          ? FontStyle.italic
+                                          : FontStyle.normal,
                                       color: textColor,
-                                      decoration: isLink ? TextDecoration.underline : TextDecoration.none,
+                                      decoration: isLink
+                                          ? TextDecoration.underline
+                                          : TextDecoration.none,
                                     ),
                                   ),
                                   const SizedBox(height: 6),
                                   Text(
                                     timeOfDay(ts),
-                                    style: TextStyle(fontSize: 11, color: Colors.grey.shade600),
+                                    style: TextStyle(
+                                        fontSize: 11,
+                                        color: Colors.grey.shade600),
                                   ),
                                 ],
                               ),
@@ -1739,8 +1832,7 @@ class _ThreadScreenState extends State<ThreadScreen> {
   }
 
   Future<void> _startCall({required bool video}) async {
-
-    if (!_isGroup && _peerId != null) { // Only for 1v1 and if peerId is known
+    if (!_isGroup && _peerId != null) {
       if (_isPeerBlockedByMe) {
         _snack('You cannot call $_title. You have blocked them.', isError: true);
         return;
@@ -1766,14 +1858,14 @@ class _ThreadScreenState extends State<ThreadScreen> {
           builder: (_) => GroupRoomScreen(
             threadId: _tid,
             title: _title,
-            video: true, // false => audio-only join
+            video: true, // false => audio-only join (adjust if needed)
           ),
         ),
       );
       return;
     }
 
-    // 1v1: keep your ringing/invite flow
+    // 1v1: create invite, send push, then show outgoing UI
     try {
       final memRows = await _sb
           .from('thread_members')
@@ -1787,16 +1879,29 @@ class _ThreadScreenState extends State<ThreadScreen> {
         _snack('Could not identify the other participant');
         return;
       }
+      final calleeId = others.first;
+
+      // Create invite row
       final inserted = await _sb
           .from('call_invites')
           .insert({
         'thread_id': _tid,
         'caller_id': me,
-        'callee_id': others.first,
+        'callee_id': calleeId,
         'kind': video ? 'video' : 'audio',
       })
           .select('id')
           .single();
+
+      // 🔔 Send the actual FCM "call" push (Edge Function -> FCM)
+      await CallActions.startCall(
+        threadId: _tid,
+        calleeUserId: calleeId,
+        video: video,
+        callerName: _title, // optional
+        callId: inserted['id']!as String, // reuse invite id
+      );
+
       if (!mounted) return;
       Navigator.pushNamed(
         context,
@@ -1823,6 +1928,39 @@ class _ThreadScreenState extends State<ThreadScreen> {
   }
 }
 
+class CallActions {
+  static final _sb = Supabase.instance.client;
+
+  static Future<void> startCall({
+    required String threadId,
+    required String calleeUserId, // kept for clarity; threadId is what the Edge fn uses
+    required bool video,
+    required String callerName,
+    required String callId,
+  }) async {
+    final me = _sb.auth.currentUser?.id;
+    if (me == null) return;
+
+    // Route the app will open when user taps the full-screen notification
+    final route =
+        '/incoming_call?threadId=$threadId&callId=$callId&video=${video ? '1' : '0'}';
+
+    await _sb.functions.invoke('send_push_users', body: {
+      'threadId': threadId,        // Edge fn resolves all members except sender
+      'fromUserId': me,            // exclude me
+      'isCall': true,              // DATA-ONLY call push
+      'title': callerName,         // optional
+      'route': route,              // handy for clients that read top-level
+      'data': {
+        'type': 'call',
+        'callType': video ? 'video' : 'audio',
+        'callId': callId,
+        'route': route,            // data.route is what your handler reads
+      },
+      'pruneInvalid': true,
+    });
+  }
+}
 // ------------------ Group info sheet ------------------
 
 class _GroupInfoSheet extends StatelessWidget {
@@ -1839,6 +1977,8 @@ class _GroupInfoSheet extends StatelessWidget {
     required this.onAddMembers,
     required this.onRemoveMember,
   });
+
+
 
   @override
   Widget build(BuildContext context) {
@@ -1886,10 +2026,17 @@ class _GroupInfoSheet extends StatelessWidget {
                           context: context,
                           builder: (_) => AlertDialog(
                             title: const Text('Remove member?'),
-                            content: Text('Remove ${_label(e.value)} from this group?'),
+                            content: Text(
+                                'Remove ${_label(e.value)} from this group?'),
                             actions: [
-                              TextButton(onPressed: () => Navigator.pop(context, false), child: const Text('Cancel')),
-                              FilledButton(onPressed: () => Navigator.pop(context, true), child: const Text('Remove')),
+                              TextButton(
+                                  onPressed: () =>
+                                      Navigator.pop(context, false),
+                                  child: const Text('Cancel')),
+                              FilledButton(
+                                  onPressed: () =>
+                                      Navigator.pop(context, true),
+                                  child: const Text('Remove')),
                             ],
                           ),
                         );

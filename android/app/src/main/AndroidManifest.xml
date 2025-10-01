@@ -7,14 +7,21 @@
     <uses-permission android:name="android.permission.RECORD_AUDIO" />
     <uses-permission android:name="android.permission.MODIFY_AUDIO_SETTINGS" />
     <uses-permission android:name="android.permission.WAKE_LOCK" />
-    <uses-permission android:name="android.permission.ACCESS_COARSE_LOCATION"/>
-    <uses-permission android:name="android.permission.ACCESS_FINE_LOCATION"/>
+    <uses-permission android:name="android.permission.ACCESS_COARSE_LOCATION" />
+    <uses-permission android:name="android.permission.ACCESS_FINE_LOCATION" />
+
+    <!-- ✅ Required for fullScreenIntent call notifications on Android 10+ -->
+    <uses-permission android:name="android.permission.USE_FULL_SCREEN_INTENT" />
+
     <!-- Foreground services for live calls (Android 9+) -->
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_CAMERA" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MICROPHONE" />
-    <uses-permission android:name="android.permission.READ_MEDIA_IMAGES"/>
-    <uses-permission android:name="android.permission.READ_MEDIA_VIDEO"/>
+
+    <!-- Media access (Android 13+) -->
+    <uses-permission android:name="android.permission.READ_MEDIA_IMAGES" />
+    <uses-permission android:name="android.permission.READ_MEDIA_VIDEO" />
+
     <!-- Runtime notifications (Android 13+) -->
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
 
@@ -25,8 +32,7 @@
 
         <meta-data
             android:name="com.google.android.gms.ads.APPLICATION_ID"
-            android:value="ca-app-pub-3940256099942544~3347511713"/>
-
+            android:value="ca-app-pub-3940256099942544~3347511713" />
 
         <activity
             android:name=".MainActivity"
@@ -36,7 +42,9 @@
             android:theme="@style/LaunchTheme"
             android:configChanges="orientation|keyboardHidden|keyboard|screenSize|smallestScreenSize|locale|layoutDirection|fontScale|screenLayout|density|uiMode"
             android:hardwareAccelerated="true"
-            android:windowSoftInputMode="adjustResize">
+            android:windowSoftInputMode="adjustResize"
+            android:showWhenLocked="true"
+            android:turnScreenOn="true">
 
             <!-- Theme used before Flutter UI draws -->
             <meta-data
@@ -55,11 +63,12 @@
             android:value="2" />
     </application>
 
-    <!-- Package visibility for Process Text plugin -->
+        <!-- Package visibility for Process Text plugin -->
     <queries>
         <intent>
             <action android:name="android.intent.action.PROCESS_TEXT" />
             <data android:mimeType="text/plain" />
         </intent>
     </queries>
+
 </manifest>
