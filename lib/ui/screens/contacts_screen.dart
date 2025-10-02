@@ -400,6 +400,22 @@ class _ContactsScreenState extends State<ContactsScreen> {
     final email = (c['email'] as String?) ?? '';
     final contactId = c['id'] as String? ?? '';
 
+    /*final deleteBtn = IconButton(
+      tooltip: 'Delete',
+      onPressed: () => _deleteContact(contactId),
+      icon: const Icon(Icons.delete_outline),
+      style: IconButton.styleFrom(
+        backgroundColor: const Color(0xFF0E141C),
+        foregroundColor: Theme.of(context).colorScheme.error,
+      ),
+    );
+
+    final blockBtn = IconButton(
+      tooltip: 'Block User',
+      icon: const Icon(Icons.block, color: Colors.orangeAccent), // Or another distinct color
+      onPressed: () => _initiateBlockUser(contactId, title),
+    );*/
+
     return Card(
       child: ListTile(
         leading: Avatar(name: title),

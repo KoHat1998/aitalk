@@ -121,7 +121,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
                   child: ListTile(
                     leading: const Icon(Icons.qr_code_2),
                     title: Text(code),
-                    subtitle: const Text('Your friend code'),
+                    subtitle: const Text('My code'),
                     trailing: Wrap(
                       spacing: 8,
                       children: [

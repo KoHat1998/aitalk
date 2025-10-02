@@ -127,7 +127,19 @@ class AppRoutes {
         return MaterialPageRoute(builder: (_) => const BlockedUsersScreen());
     // Contacts / codes / QR
       case addContact:
-        return MaterialPageRoute(builder: (_) => const AddContactScreen());
+        String? initialContactCodeFromArgs;
+        // Check if arguments were passed and if they are of the expected type (Map)
+        if (s.arguments is Map<String, dynamic>) {
+          final args = s.arguments as Map<String, dynamic>;
+          initialContactCodeFromArgs = args['initialContactCode'] as String?;
+        }
+
+        return MaterialPageRoute(
+          builder: (_) => AddContactScreen(
+            initialContactCode: initialContactCodeFromArgs,
+          ),
+        );
+
       case myCode:
         return MaterialPageRoute(builder: (_) => const MyCodeScreen());
       case scanQr:
