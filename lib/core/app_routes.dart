@@ -1,3 +1,4 @@
+// lib/core/app_routes.dart
 import 'package:flutter/material.dart';
 
 import '../ui/screens/blocked_users_screen.dart';
@@ -9,12 +10,12 @@ import '../ui/screens/contacts_screen.dart';
 import '../ui/screens/chats_screen.dart';
 import '../ui/screens/settings_screen.dart';
 import '../ui/screens/new_group_screen.dart';
-import '../ui/screens/thread_screen.dart';
-import '../ui/screens/call_screen.dart';
+import '../ui/screens/thread_screen.dart' show ThreadArgs, ThreadScreen;
+import '../ui/screens/call_screen.dart' show CallArgs, CallScreen;
 
 // Call ringing screens
-import '../ui/screens/outgoing_call_screen.dart';
-import '../ui/screens/incoming_call_screen.dart';
+import '../ui/screens/outgoing_call_screen.dart' show OutgoingCallArgs, OutgoingCallScreen;
+import '../ui/screens/incoming_call_screen.dart' show IncomingCallArgs, IncomingCallScreen;
 
 // Contacts / friend features
 import '../ui/screens/add_contact_screen.dart';
@@ -23,6 +24,9 @@ import '../ui/screens/qr_scan_screen.dart';
 import '../ui/screens/edit_profile_screen.dart';
 
 class AppRoutes {
+  // REMOVE: navigatorKey here. We use pushNavKey from push_route_handler.dart in main.dart.
+  // static final navigatorKey = GlobalKey<NavigatorState>();
+
   static const splash = '/';
   static const signIn = '/sign-in';
   static const signUp = '/sign-up';
@@ -37,9 +41,9 @@ class AppRoutes {
   static const thread = '/thread';
   static const call = '/call';
 
-  // New for ringing flow
+  // Ringing flow
   static const outgoingCall = '/outgoing-call';
-  static const incomingCall = '/incoming-call';
+  static const incomingCall = '/incoming-call'; // <- keep hyphen form (matches your handler)
 
   static const addContact = '/add-contact';
   static const myCode = '/my-code';
@@ -48,97 +52,161 @@ class AppRoutes {
 
   static const editProfile = '/edit-profile';
 
+
   static Route<dynamic> onGenerateRoute(RouteSettings s) {
     switch (s.name) {
       case splash:
-        return MaterialPageRoute(builder: (_) => const SplashScreen());
+        return MaterialPageRoute(
+          builder: (_) => const SplashScreen(),
+          settings: const RouteSettings(name: splash),
+        );
 
       case signIn:
-        return MaterialPageRoute(builder: (_) => const SignInScreen());
+        return MaterialPageRoute(
+          builder: (_) => const SignInScreen(),
+          settings: const RouteSettings(name: signIn),
+        );
 
       case signUp:
-        return MaterialPageRoute(builder: (_) => const SignUpScreen());
+        return MaterialPageRoute(
+          builder: (_) => const SignUpScreen(),
+          settings: const RouteSettings(name: signUp),
+        );
 
       case shell:
-        return MaterialPageRoute(builder: (_) => const Shell());
+        return MaterialPageRoute(
+          builder: (_) => const Shell(),
+          settings: const RouteSettings(name: shell),
+        );
 
       case contacts:
-        return MaterialPageRoute(builder: (_) => const ContactsScreen());
+        return MaterialPageRoute(
+          builder: (_) => const ContactsScreen(),
+          settings: const RouteSettings(name: contacts),
+        );
 
       case chats:
-        return MaterialPageRoute(builder: (_) => const ChatsScreen());
+        return MaterialPageRoute(
+          builder: (_) => const ChatsScreen(),
+          settings: const RouteSettings(name: chats),
+        );
 
       case settings:
-        return MaterialPageRoute(builder: (_) => const SettingsScreen());
+        return MaterialPageRoute(
+          builder: (_) => const SettingsScreen(),
+          settings: const RouteSettings(name: settings),
+        );
 
       case newGroup:
-        return MaterialPageRoute(builder: (_) => const NewGroupScreen());
+        return MaterialPageRoute(
+          builder: (_) => const NewGroupScreen(),
+          settings: const RouteSettings(name: newGroup),
+        );
 
       case thread: {
         final args = s.arguments;
         if (args is! ThreadArgs) {
-          return MaterialPageRoute(
-            builder: (_) => const Scaffold(
-              body: Center(child: Text('Missing thread arguments')),
-            ),
-          );
+          return _badArgs('Missing thread arguments', name: thread);
         }
-        return MaterialPageRoute(builder: (_) => ThreadScreen(args: args));
+        return MaterialPageRoute(
+          builder: (_) => ThreadScreen(args: args),
+          settings: const RouteSettings(name: thread),
+        );
       }
 
       case call: {
         final args = s.arguments;
         if (args is! CallArgs) {
-          return MaterialPageRoute(
-            builder: (_) => const Scaffold(
-              body: Center(child: Text('Missing call arguments (threadId required)')),
-            ),
-          );
+          return _badArgs('Missing call arguments (threadId required)', name: call);
         }
-        return MaterialPageRoute(builder: (_) => CallScreen(args: args));
+        return MaterialPageRoute(
+          builder: (_) => CallScreen(args: args),
+          settings: const RouteSettings(name: call),
+        );
       }
 
-    // ---- New ringing routes ----
+    // ---- Ringing routes ----
       case outgoingCall: {
         final args = s.arguments;
         if (args is! OutgoingCallArgs) {
-          return MaterialPageRoute(
-            builder: (_) => const Scaffold(
-              body: Center(child: Text('Missing outgoing call args')),
-            ),
-          );
+          return _badArgs('Missing outgoing call args', name: outgoingCall);
         }
-        return MaterialPageRoute(builder: (_) => OutgoingCallScreen(args: args));
+        // Fullscreen so it sits above UI during setup
+        return MaterialPageRoute(
+          builder: (_) => OutgoingCallScreen(args: args),
+          fullscreenDialog: true,
+          settings: const RouteSettings(name: outgoingCall),
+        );
       }
 
       case incomingCall: {
         final args = s.arguments;
         if (args is! IncomingCallArgs) {
-          return MaterialPageRoute(
-            builder: (_) => const Scaffold(
-              body: Center(child: Text('Missing incoming call args')),
-            ),
-          );
+          return _badArgs('Missing incoming call args', name: incomingCall);
         }
-        return MaterialPageRoute(builder: (_) => IncomingCallScreen(args: args));
+        // Fullscreen so it overlays when restored from notification tap (cold-start too)
+        return MaterialPageRoute(
+          builder: (_) => IncomingCallScreen(args: args),
+          fullscreenDialog: true,
+          settings: const RouteSettings(name: incomingCall),
+        );
       }
 
       case blockedUsers:
-        return MaterialPageRoute(builder: (_) => const BlockedUsersScreen());
-    // Contacts / codes / QR
-      case addContact:
-        return MaterialPageRoute(builder: (_) => const AddContactScreen());
-      case myCode:
-        return MaterialPageRoute(builder: (_) => const MyCodeScreen());
-      case scanQr:
-        return MaterialPageRoute(builder: (_) => const QrScanScreen());
+        return MaterialPageRoute(
+          builder: (_) => const BlockedUsersScreen(),
+          settings: const RouteSettings(name: blockedUsers),
+        );
 
-    // Edit profile
+      case addContact:
+        String? initialContactCodeFromArgs;
+        if (s.arguments is Map<String, dynamic>) {
+          final args = s.arguments as Map<String, dynamic>;
+          // Only try to extract 'initialContactCode' as that's what AddContactScreen now expects
+          initialContactCodeFromArgs = args['initialContactCode'] as String?;
+        }
+
+        return MaterialPageRoute(
+          builder: (_) => AddContactScreen(
+            initialContactCode: initialContactCodeFromArgs,
+          ),
+          settings: const RouteSettings(name: addContact),
+        );
+
+      case myCode:
+        return MaterialPageRoute(
+          builder: (_) => const MyCodeScreen(),
+          settings: const RouteSettings(name: myCode),
+        );
+
+      case scanQr:
+        return MaterialPageRoute(
+          builder: (_) => const QrScanScreen(),
+          settings: const RouteSettings(name: scanQr),
+        );
+
       case editProfile:
-        return MaterialPageRoute(builder: (_) => const EditProfileScreen());
+        return MaterialPageRoute(
+          builder: (_) => const EditProfileScreen(),
+          settings: const RouteSettings(name: editProfile),
+        );
 
       default:
-        return MaterialPageRoute(builder: (_) => const SplashScreen());
+      // Fallback to splash to avoid a blank screen on unknown names
+        return MaterialPageRoute(
+          builder: (_) => const SplashScreen(),
+          settings: const RouteSettings(name: splash),
+        );
     }
+  }
+
+  static MaterialPageRoute _badArgs(String message, {required String name}) {
+    return MaterialPageRoute(
+      builder: (_) => Scaffold(
+        appBar: AppBar(title: Text(name)),
+        body: Center(child: Text(message)),
+      ),
+      settings: RouteSettings(name: name),
+    );
   }
 }
