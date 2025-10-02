@@ -14,7 +14,6 @@ import 'package:path_provider/path_provider.dart';
 import 'package:share_plus/share_plus.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
 import 'package:url_launcher/url_launcher.dart';
-import 'package:supabase_flutter/supabase_flutter.dart';
 
 import '../../core/app_routes.dart';
 import '../../core/call_actions.dart'; // 🔔 send FCM call push
@@ -52,8 +51,8 @@ class _ThreadScreenState extends State<ThreadScreen> {
   final _sb = Supabase.instance.client;
 
   late final String _tid;
-  late String _title; // mutable (rename group)
-  late final String? _peerId;
+  String _title = 'Chat';                 // mutable (can be hydrated)
+  String? _peerId;                        // 👈 made mutable so we can resolve it later
 
   final _scroll = ScrollController();
 
@@ -79,12 +78,17 @@ class _ThreadScreenState extends State<ThreadScreen> {
   String? get _myId => _sb.auth.currentUser?.id;
   bool get _isGroup => widget.args.isGroup;
 
+  bool _didFirstAutoScroll = false;       // 👈 first-build jump flag
+
   @override
   void initState() {
     super.initState();
     _tid = widget.args.threadId;
     _title = widget.args.title;
-    _peerId = widget.args.peerId;
+    _peerId = widget.args.peerId;         // remains null if not provided by payload
+
+    // If notification didn't carry a name, fetch it (1:1 only)
+    _hydrateTitleFromServerIfNeeded();
 
     _loadInitialScreenData();
   }
@@ -158,8 +162,8 @@ class _ThreadScreenState extends State<ThreadScreen> {
 
   Future<void> _initiateBlockPeer() async {
     final currentUserId = _myId;
-    final peerIdToBlock = _peerId; // From widget.args via initState
-    final peerName = _title; // Username from widget.args
+    final peerIdToBlock = _peerId; // From widget.args via initState/hydration
+    final peerName = _title; // Username from widget.args or hydrated
 
     if (currentUserId == null) {
       _snack('You need to be logged in.', isError: true);
@@ -477,7 +481,73 @@ class _ThreadScreenState extends State<ThreadScreen> {
     });
   }
 
+  void _maybeFirstAutoScroll() {
+    if (_didFirstAutoScroll) return;
+    _didFirstAutoScroll = true;
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (_scroll.hasClients) {
+        _scroll.jumpTo(_scroll.position.maxScrollExtent);
+      }
+    });
+  }
+
   // ------------------ Helpers ------------------
+
+  // Resolve the 1:1 peer userId (if args.peerId is null) and its display name
+  Future<Map<String, String?>?> _resolvePeerAndName() async {
+    try {
+      final me = _myId;
+      if (me == null) return null;
+
+      String? pid = _peerId;
+      if (pid == null) {
+        final rows = await _sb
+            .from('thread_members')
+            .select('user_id')
+            .eq('thread_id', _tid);
+
+        final ids = (rows as List)
+            .map((r) => (r as Map)['user_id'] as String)
+            .where((id) => id != me)
+            .toList();
+
+        if (ids.isEmpty) return null;
+        pid = ids.first; // 1:1 thread expected
+      }
+
+      final prof = await _sb
+          .from('users')
+          .select('display_name, email')
+          .eq('id', pid)
+          .maybeSingle();
+
+      String? dn = (prof?['display_name'] as String?)?.trim();
+      dn ??= (prof?['email'] as String?)?.split('@').first;
+
+      return {'peerId': pid, 'name': dn};
+    } catch (_) {
+      return null;
+    }
+  }
+
+  /// If the title is generic, hydrate it from server (1:1 only)
+  Future<void> _hydrateTitleFromServerIfNeeded() async {
+    if (_isGroup) return;
+    if (_title.trim().isNotEmpty && _title != 'Chat') return;
+
+    final res = await _resolvePeerAndName();
+    if (!mounted || res == null) return;
+
+    // populate peerId if missing
+    if (_peerId == null && (res['peerId'] ?? '').isNotEmpty) {
+      _peerId = res['peerId'];
+    }
+
+    final newTitle = (res['name'] ?? '').trim();
+    if (newTitle.isNotEmpty) {
+      setState(() => _title = newTitle);
+    }
+  }
 
   bool _isUrl(String s) {
     final u = Uri.tryParse(s.trim());
@@ -1252,6 +1322,9 @@ class _ThreadScreenState extends State<ThreadScreen> {
       return true;
     }).toList();
 
+    // Ensure first-time landing shows the latest
+    _maybeFirstAutoScroll();
+
     return Scaffold(
       appBar: AppBar(
         title: Text(_title),
@@ -1899,7 +1972,7 @@ class _ThreadScreenState extends State<ThreadScreen> {
         calleeUserId: calleeId,
         video: video,
         callerName: _title, // optional
-        callId: inserted['id']!as String, // reuse invite id
+        callId: inserted['id']! as String, // reuse invite id
       );
 
       if (!mounted) return;
@@ -1961,6 +2034,7 @@ class CallActions {
     });
   }
 }
+
 // ------------------ Group info sheet ------------------
 
 class _GroupInfoSheet extends StatelessWidget {
@@ -1977,8 +2051,6 @@ class _GroupInfoSheet extends StatelessWidget {
     required this.onAddMembers,
     required this.onRemoveMember,
   });
-
-
 
   @override
   Widget build(BuildContext context) {

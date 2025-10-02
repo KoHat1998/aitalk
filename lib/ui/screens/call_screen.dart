@@ -1,3 +1,4 @@
+// lib/ui/screens/call_screen.dart
 import 'dart:async';
 import 'package:flutter/material.dart';
 import 'package:permission_handler/permission_handler.dart';
@@ -10,9 +11,9 @@ import '../widgets/round_icon_button.dart';
 
 class CallArgs {
   final String threadId;
-  final String title;
+  final String title;          // can be empty; we'll compute a fallback
   final bool video;
-  final String? inviteId; // used to sync end state
+  final String? inviteId;      // used to sync end state
   const CallArgs({
     required this.threadId,
     this.title = 'Video Call',
@@ -36,7 +37,7 @@ class _CallScreenState extends State<CallScreen> {
   CancelListenFunc? _cancelEvents;
 
   bool _connecting = true;
-  bool _joining = false;     // ← NEW: track connect in-flight
+  bool _joining = false;     // track connect in-flight
   bool _micOn = true;
   bool _camOn = true;
   bool _frontCam = true;
@@ -85,7 +86,10 @@ class _CallScreenState extends State<CallScreen> {
       callback: (payload) {
         final status = payload.newRecord?['status'] as String?;
         if (status == null) return;
-        if (status == 'ended' || status == 'canceled' || status == 'declined' || status == 'timeout') {
+        if (status == 'ended' ||
+            status == 'canceled' ||
+            status == 'declined' ||
+            status == 'timeout') {
           _remoteEnded();
         }
       },
@@ -351,7 +355,8 @@ class _CallScreenState extends State<CallScreen> {
     }
   }
 
-  List<Participant> _remotes() => (_room?.remoteParticipants.values.toList() ?? const []);
+  List<Participant> _remotes() =>
+      (_room?.remoteParticipants.values.toList() ?? const []);
 
   lk.VideoTrack? _firstCameraTrack(Participant p) {
     for (final pub in p.videoTrackPublications) {
@@ -382,12 +387,17 @@ class _CallScreenState extends State<CallScreen> {
 
   @override
   Widget build(BuildContext context) {
+    // Never show a blank title:
+    final computedTitle = (widget.args.title.trim().isNotEmpty)
+        ? widget.args.title
+        : (widget.args.video ? 'Video call' : 'Audio call');
+
     final (primaryP, primaryT) = _primaryTrackRemoteOnly();
 
     return Scaffold(
       backgroundColor: Colors.black,
       appBar: AppBar(
-        title: Text(widget.args.title),
+        title: Text(computedTitle),
         leading: IconButton(icon: const Icon(Icons.chevron_left), onPressed: _hangup),
       ),
       body: Stack(

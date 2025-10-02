@@ -21,19 +21,16 @@ Future<void> main() async {
     anonKey: Env.supabaseAnonKey,
   );
 
-  // Initialize FCM/local notifications and wire deep links
+  // Initialize push and wire deep links BEFORE runApp
   await PushService.init(
-    onOpenRoute: handlePushRoute, // parses "/call" and "/thread/<id>"
-    onForegroundMessage: (_) {
-      // No system banner for foreground messages; update badges/UI if desired.
-    },
+    onOpenRoute: handlePushRoute,
+    onForegroundMessage: (_) {},
   );
 
-  // Light icons on a dark UI
   SystemChrome.setSystemUIOverlayStyle(const SystemUiOverlayStyle(
     statusBarColor: Colors.transparent,
-    statusBarIconBrightness: Brightness.light, // Android
-    statusBarBrightness: Brightness.dark,      // iOS
+    statusBarIconBrightness: Brightness.light,
+    statusBarBrightness: Brightness.dark,
     systemNavigationBarColor: Colors.black,
     systemNavigationBarIconBrightness: Brightness.light,
   ));
@@ -51,9 +48,12 @@ class AiTalkApp extends StatelessWidget {
       debugShowCheckedModeBanner: false,
       theme: AppTheme.dark(),
       themeMode: ThemeMode.dark,
+
+      // <<< This is crucial for cold-start taps
+      navigatorKey: pushNavKey,
+
       onGenerateRoute: AppRoutes.onGenerateRoute,
       initialRoute: AppRoutes.splash,
-      navigatorKey: pushNavKey, // global key used by push route handler
     );
   }
 }
